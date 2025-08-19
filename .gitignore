@@ -17,6 +17,7 @@ models/*
 !*.dvc
 !dvc.yaml
 !dvc.lock
+gdrive_service_key.json
 
 # MLflow
 mlruns/*/artifacts/*.pt
