@@ -1,0 +1,5 @@
+outs:
+- md5: a7e73624e0f3d3726104f217ead3d8c5
+  size: 6389512
+  hash: md5
+  path: yolov8n-face.pt
