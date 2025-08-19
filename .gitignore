@@ -1,20 +1,37 @@
+# Env
 venv/
 .venv/
+env/
 
-*.pt
-*.pth
-data/
-models/
+# Python
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+
+# DVC
+.dvc/cache/
+.dvc/tmp/
+data/*
+models/*
+!*.dvc
+!dvc.yaml
+!dvc.lock
+
+# MLflow
 mlruns/*/artifacts/*.pt
 mlruns/*/artifacts/*.pth
 mlruns/*/artifacts/*.zip
+mlruns/*/artifacts/large_files/
 
+# 
+*.pt
+*.pth
 outputs/
 
-*.pyc
-src/__pycache__/
-
+# Jupyter
 .ipynb_checkpoints/
 
+# System
 .DS_Store
 Thumbs.db
