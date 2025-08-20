@@ -1,0 +1,15 @@
+artifact_uri: file:///D:/microexpressions/mlruns/135519846664802398/d4dd0a2b29da4f11975605fb99f8731a/artifacts
+end_time: 1755612050696
+entry_point_name: ''
+experiment_id: '135519846664802398'
+lifecycle_stage: active
+run_id: d4dd0a2b29da4f11975605fb99f8731a
+run_name: wistful-stag-154
+run_uuid: d4dd0a2b29da4f11975605fb99f8731a
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1755607907817
+status: 3
+tags: []
+user_id: SL-2577

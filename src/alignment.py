@@ -1,10 +1,17 @@
 import cv2
 import numpy as np
+import os
+import argparse
+import logging
 from ultralytics import YOLO
+import mlflow
+import mlflow.pytorch
 
-def detect_faces(image_path, model_path, device="cuda:0"):
+
+def detect_faces(image_path, model, device="cuda:0"):
     image = cv2.imread(image_path)
-    model = YOLO(model_path)
+    if isinstance(model, str):
+        model = YOLO(model)
     results = model.predict(image_path, device=device, conf=0.02, iou=0.5)
 
     detections = []
@@ -25,7 +32,7 @@ def detect_faces(image_path, model_path, device="cuda:0"):
 
     return image, detections
 
-def align_face(image, landmarks, bbox, output_size=(112, 112)):
+def align_face(image, landmarks, bbox, output_size=(128, 128)):
     left_eye = landmarks[0]
     right_eye = landmarks[1]
     nose = landmarks[2]
@@ -93,3 +100,75 @@ def align_face(image, landmarks, bbox, output_size=(112, 112)):
     final_image[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized_face
     
     return final_image
+
+
+def process_images_celeba(input_path, output_path, model_path, device="cuda:0", output_size=(128, 128), conf=0.02, iou=0.5):
+    os.makedirs(output_path, exist_ok=True)
+    model = YOLO(model_path)
+    
+    total_images = 0
+    faces_processed = 0
+    faces_skipped = 0
+
+    for img_file in os.listdir(input_path):
+        if img_file.endswith((".jpg", ".png")):
+            total_images += 1
+            img_path = os.path.join(input_path, img_file)
+            image, detections = detect_faces(img_path, model, device)
+            if not detections:
+                logger.info(f"No faces detected in {img_file}, skipping")
+                faces_skipped += 1
+                continue
+            if detections:
+                try:
+                    aligned_image = align_face(image, np.array(detections[0]["landmarks"]), detections[0]["bbox"], output_size=output_size)
+                    output_file = os.path.join(output_path, f"aligned_{img_file}")
+                    cv2.imwrite(output_file, aligned_image)
+                    logger.info(f"Saved aligned face for {img_file} to {output_file}")
+                    faces_processed += 1
+                    if faces_processed <= 5:
+                        mlflow.log_artifact(output_file)
+                except:
+                    logger.info(f"Skipping face in {img_file} due to alignment issues")
+                    faces_skipped += 1
+    mlflow.log_metric("total_images_processed", total_images)
+    mlflow.log_metric("faces_processed", faces_processed)
+    mlflow.log_metric("faces_skipped", faces_skipped)
+                    
+logger = logging.getLogger(__name__)
+if __name__ == "__main__":
+    import torch
+    print(torch.cuda.is_available())
+    exit
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler("alignment_errors.log"),
+            logging.StreamHandler()
+        ]
+    )
+    
+    parser = argparse.ArgumentParser(description="Detect and align faces in images")
+    parser.add_argument("--input", required=True, help="Path to input images")
+    parser.add_argument("--output", required=True, help="Path to save aligned faces")
+    parser.add_argument("--model", required=True, help="Path to YOLO model")
+    parser.add_argument("--device", default="cuda:0", help="Device to run model on")
+    parser.add_argument("--output-size", default="128x128", help="Output size as WIDTHxHEIGHT")
+    parser.add_argument("--conf", type=float, default=0.02, help="Confidence threshold for YOLO")
+    parser.add_argument("--iou", type=float, default=0.5, help="IOU threshold for YOLO")
+    args = parser.parse_args()
+    output_size = tuple(map(int, args.output_size.split('x')))
+
+    mlflow.set_experiment("face_alignment")
+    with mlflow.start_run():
+        mlflow.log_param("input_path", args.input)
+        mlflow.log_param("output_path", args.output)
+        mlflow.log_param("model_path", args.model)
+        mlflow.log_param("device", args.device)
+        mlflow.log_param("output_size", args.output_size)
+        mlflow.log_param("conf", args.conf)
+        mlflow.log_param("iou", args.iou)
+
+        process_images_celeba(args.input, args.output, args.model, args.device, output_size, args.conf, args.iou)
