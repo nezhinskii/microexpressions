@@ -5,7 +5,6 @@ import argparse
 import logging
 from ultralytics import YOLO
 import mlflow
-import mlflow.pytorch
 
 
 def detect_faces(image_path, model, device="cuda:0"):
