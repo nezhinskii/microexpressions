@@ -12,6 +12,7 @@ __pycache__/
 # DVC
 .dvc/cache/
 .dvc/tmp/
+.dvc/config
 data/*
 models/*
 !*.dvc
