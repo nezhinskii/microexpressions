@@ -4,6 +4,7 @@ import os
 import argparse
 import logging
 from ultralytics import YOLO
+from tqdm import tqdm
 import mlflow
 
 
@@ -11,7 +12,7 @@ def detect_faces(image_path, model, device="cuda:0"):
     image = cv2.imread(image_path)
     if isinstance(model, str):
         model = YOLO(model)
-    results = model.predict(image_path, device=device, conf=0.02, iou=0.5)
+    results = model.predict(image_path, device=device, conf=0.02, iou=0.5, verbose=False)
 
     detections = []
     for result in results:
@@ -108,8 +109,9 @@ def process_images_celeba(input_path, output_path, model_path, device="cuda:0", 
     total_images = 0
     faces_processed = 0
     faces_skipped = 0
+    image_files = [f for f in os.listdir(input_path) if f.endswith((".jpg", ".png"))]
 
-    for img_file in os.listdir(input_path):
+    for img_file in tqdm(image_files, desc="Processing images", unit="image"):
         if img_file.endswith((".jpg", ".png")):
             total_images += 1
             img_path = os.path.join(input_path, img_file)
@@ -145,7 +147,6 @@ if __name__ == "__main__":
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
             logging.FileHandler("alignment_errors.log"),
-            logging.StreamHandler()
         ]
     )
     
