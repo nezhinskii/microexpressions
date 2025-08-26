@@ -1,0 +1,14 @@
+artifact_uri: file:///D:/microexpressions/mlruns/135519846664802398/14b2e1b0fff14c35a2ef25968a1fd74e/artifacts
+end_time: 1756200454042
+entry_point_name: ''
+experiment_id: '135519846664802398'
+lifecycle_stage: active
+run_id: 14b2e1b0fff14c35a2ef25968a1fd74e
+run_name: sneaky-slug-193
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1756199002284
+status: 3
+tags: []
+user_id: SL-2577

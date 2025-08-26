@@ -2,6 +2,7 @@ import argparse
 import os
 import mlflow
 import torch
+from tqdm import tqdm
 import torchvision.transforms as transforms
 from PIL import Image
 import pandas as pd
@@ -116,7 +117,7 @@ def get_landmarks(input_path, output_path, model_path, model_type, device="cuda:
     dataset = ImageDataset(input_path, transform=transforms_image)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
     results = []
-    for batch_images, batch_filenames in dataloader:
+    for batch_images, batch_filenames in tqdm(dataloader, desc="Processing batches"):
         batch_images = batch_images.to(device)
         
         if model_type == "facexformer":
