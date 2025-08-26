@@ -1,6 +1,0 @@
-outs:
-- md5: b7c6ac922f7b7101b9520068d67978f5.dir
-  size: 1170433129
-  nfiles: 182151
-  hash: md5
-  path: aligned_celeba

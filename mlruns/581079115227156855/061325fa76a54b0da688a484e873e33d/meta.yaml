@@ -1,0 +1,14 @@
+artifact_uri: file:///d:/microexpressions/mlruns/581079115227156855/061325fa76a54b0da688a484e873e33d/artifacts
+end_time: 1756141824747
+entry_point_name: ''
+experiment_id: '581079115227156855'
+lifecycle_stage: active
+run_id: 061325fa76a54b0da688a484e873e33d
+run_name: stately-colt-683
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1756141824635
+status: 3
+tags: []
+user_id: SL-2577

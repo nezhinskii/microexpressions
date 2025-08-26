@@ -1,0 +1,5 @@
+outs:
+- md5: df2d82519982b03e132511df676c463e
+  size: 183355873
+  hash: md5
+  path: pipnet.pth

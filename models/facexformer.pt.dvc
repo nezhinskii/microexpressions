@@ -1,0 +1,5 @@
+outs:
+- md5: 569e5f8c0e9bdff734c74060cc1d9cf0
+  size: 1104869851
+  hash: md5
+  path: facexformer.pt
