@@ -10,8 +10,8 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 import torchvision.models as models
 
-from .facexformer import FaceXFormer
-from .pipnet import Pip_resnet101, get_meanface, forward_pip
+from facexformer import FaceXFormer
+from pipnet import Pip_resnet101, get_meanface, forward_pip
 
 class ImageDataset(Dataset):
     def __init__(self, input_path, transform=None):
@@ -109,7 +109,7 @@ def get_landmarks_pipnet(model, batch_images, reverse_index1, reverse_index2, ma
     
     return torch.stack(landmark_output)
     
-def get_landmarks(input_path, output_path, model_path, model_type, device="cuda:0", batch_size=32, meanface_path=None):
+def get_landmarks(input_path, input_name, output_path, model_path, model_type, device="cuda:0", batch_size=32, meanface_path=None):
     os.makedirs(output_path, exist_ok=True)
     model, extra_data = load_model(model_type, model_path, device, meanface_path)
     transforms_image = get_transforms(model_type)
@@ -138,12 +138,13 @@ def get_landmarks(input_path, output_path, model_path, model_type, device="cuda:
             results.append(result)
     
     df = pd.DataFrame(results)
-    output_file = os.path.join(output_path, f"landmarks_{model_type}.h5")
+    output_file = os.path.join(output_path, f"landmarks_{input_name}_{model_type}.h5")
     df.to_hdf(output_file, key='landmarks', mode='w', format='table')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="Path to input images")
+    parser.add_argument("--input_name", help="Input dataset name")
     parser.add_argument("--output", required=True, help="Path to save aligned faces")
     parser.add_argument("--model", required=True, help="Path to YOLO model")
     parser.add_argument("--model_type", required=True, choices=["facexformer", "pipnet"], help="Model type")
@@ -155,6 +156,7 @@ if __name__ == "__main__":
     mlflow.set_experiment("face_alignment")
     with mlflow.start_run():
         mlflow.log_param("input_path", args.input)
+        mlflow.log_param("input_name", args.input_name)
         mlflow.log_param("output_path", args.output)
         mlflow.log_param("model_path", args.model)
         mlflow.log_param("model_type", args.model_type)
@@ -162,4 +164,4 @@ if __name__ == "__main__":
         mlflow.log_param("device", args.device)
         mlflow.log_param("batch_size", args.batch_size)
         
-        get_landmarks(args.input, args.output, args.model, args.model_type, args.device, args.batch_size, args.meanface_path)
+        get_landmarks(args.input, args.input_name, args.output, args.model, args.model_type, args.device, args.batch_size, args.meanface_path)
