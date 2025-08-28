@@ -138,7 +138,7 @@ def get_landmarks(input_path, input_name, output_path, model_path, model_type, d
             results.append(result)
     
     df = pd.DataFrame(results)
-    output_file = os.path.join(output_path, f"landmarks_{input_name}_{model_type}.h5")
+    output_file = os.path.join(output_path, f"lm_{input_name}_{model_type}.h5")
     df.to_hdf(output_file, key='landmarks', mode='w', format='table')
 
 if __name__ == "__main__":
@@ -153,7 +153,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda:0", help="Device to run model on")
     args = parser.parse_args()
     
-    mlflow.set_experiment("face_alignment")
+    mlflow.set_experiment("landmark")
     with mlflow.start_run():
         mlflow.log_param("input_path", args.input)
         mlflow.log_param("input_name", args.input_name)

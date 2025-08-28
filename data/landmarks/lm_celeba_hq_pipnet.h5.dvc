@@ -2,4 +2,4 @@ outs:
 - md5: fb68438618e0afa0487dc7e9c2578bb8
   size: 15963867
   hash: md5
-  path: landmarks_celeba_hq_pipnet.h5
+  path: lm_celeba_hq_pipnet.h5

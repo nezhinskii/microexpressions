@@ -138,10 +138,6 @@ def process_images_celeba(input_path, output_path, model_path, device="cuda:0", 
                     
 logger = logging.getLogger(__name__)
 if __name__ == "__main__":
-    import torch
-    print(torch.cuda.is_available())
-    exit
-    
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
