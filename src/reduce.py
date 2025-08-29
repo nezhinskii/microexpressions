@@ -11,9 +11,9 @@ from sklearn.manifold import trustworthiness
 
 def reduce_landmarks(input_path, output_path, type, out_dim, random_state):
     df = pd.read_hdf(input_path)
-    coord_columns = [column for column in df.columns if re.match(r'[xy]\d+', column)]
+    coord_columns = [column for column in df.columns if re.match(r'n_[xy]\d+', column)]
     X = df[coord_columns].values
-    
+
     if type == "umap":
         reducer = UMAP(
             n_components=out_dim,
@@ -35,17 +35,19 @@ def reduce_landmarks(input_path, output_path, type, out_dim, random_state):
     result_df['filename'] = df['filename']
     result_df.to_hdf(output_path, key='data', mode='w')
     
-    trust_score = trustworthiness(X, embeddings, n_neighbors=5)
-    mlflow.log_metric("trustworthiness", trust_score)
+    mlflow.log_metric("trustworthiness5", trustworthiness(X, embeddings, n_neighbors=5))
+    mlflow.log_metric("trustworthiness20", trustworthiness(X, embeddings, n_neighbors=20))
     
     input_basename = os.path.splitext(os.path.basename(input_path))[0]
-    model_filename = f"{input_basename}_{type}_{out_dim}"
+    model_filename = f"{input_basename}_{type}{out_dim}"
     os.makedirs('models/reducers', exist_ok=True)
     if type == "umap":
         with open(f'models/reducers/{model_filename}.pkl', 'wb') as f:
             pickle.dump(reducer, f)
     else:
-        reducer.save(f'models/reducers/{model_filename}')
+        model_path = os.path.join('models', 'reducers', model_filename)
+        os.makedirs(model_path, exist_ok=True)
+        reducer.save(model_path)
     return result_df
 
 if __name__ == "__main__": 
@@ -56,7 +58,6 @@ if __name__ == "__main__":
     parser.add_argument("--out_dim", default=True, type=int, help="Output dimension")
     parser.add_argument("--random_state", default=42, type=int, help="Random state for UMAP")
     args = parser.parse_args()
-    output_size = tuple(map(int, args.output_size.split('x')))
 
     mlflow.set_experiment("dim_reduction")
     with mlflow.start_run():

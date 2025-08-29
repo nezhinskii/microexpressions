@@ -1,0 +1,14 @@
+artifact_uri: file:///D:/microexpressions/mlruns/830455214216746433/ec3bd4c3dd5e44a2be0d9df8db56c569/artifacts
+end_time: 1756386953406
+entry_point_name: ''
+experiment_id: '830455214216746433'
+lifecycle_stage: active
+run_id: ec3bd4c3dd5e44a2be0d9df8db56c569
+run_name: kindly-rat-3
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1756386465619
+status: 3
+tags: []
+user_id: SL-2577

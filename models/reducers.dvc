@@ -1,0 +1,6 @@
+outs:
+- md5: 6b89c5a11fade5762f8f66fe70f46bf3.dir
+  size: 623536399
+  nfiles: 16
+  hash: md5
+  path: reducers

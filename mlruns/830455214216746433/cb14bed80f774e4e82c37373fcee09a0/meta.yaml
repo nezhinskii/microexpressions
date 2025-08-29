@@ -1,0 +1,14 @@
+artifact_uri: file:///D:/microexpressions/mlruns/830455214216746433/cb14bed80f774e4e82c37373fcee09a0/artifacts
+end_time: 1756384247240
+entry_point_name: ''
+experiment_id: '830455214216746433'
+lifecycle_stage: active
+run_id: cb14bed80f774e4e82c37373fcee09a0
+run_name: unique-yak-905
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1756384038905
+status: 3
+tags: []
+user_id: SL-2577

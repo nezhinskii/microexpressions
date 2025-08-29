@@ -1,0 +1,14 @@
+artifact_uri: file:///D:/microexpressions/mlruns/830455214216746433/67567f276af04ec49ca91abc8a42620c/artifacts
+end_time: 1756385733870
+entry_point_name: ''
+experiment_id: '830455214216746433'
+lifecycle_stage: active
+run_id: 67567f276af04ec49ca91abc8a42620c
+run_name: upset-turtle-174
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1756385248105
+status: 3
+tags: []
+user_id: SL-2577

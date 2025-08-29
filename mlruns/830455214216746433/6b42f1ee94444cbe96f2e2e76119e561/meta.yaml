@@ -1,0 +1,14 @@
+artifact_uri: file:///D:/microexpressions/mlruns/830455214216746433/6b42f1ee94444cbe96f2e2e76119e561/artifacts
+end_time: 1756386417137
+entry_point_name: ''
+experiment_id: '830455214216746433'
+lifecycle_stage: active
+run_id: 6b42f1ee94444cbe96f2e2e76119e561
+run_name: dashing-ant-221
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1756385944912
+status: 3
+tags: []
+user_id: SL-2577

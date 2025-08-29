@@ -1,0 +1,14 @@
+artifact_uri: file:///D:/microexpressions/mlruns/830455214216746433/edcebf747da9448fa9c2a201f7e0c922/artifacts
+end_time: 1756463252465
+entry_point_name: ''
+experiment_id: '830455214216746433'
+lifecycle_stage: active
+run_id: edcebf747da9448fa9c2a201f7e0c922
+run_name: secretive-worm-385
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1756462786442
+status: 3
+tags: []
+user_id: SL-2577

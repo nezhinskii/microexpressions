@@ -1,0 +1,5 @@
+outs:
+- md5: b4f7dd5da12bc7c5fe5fc4a1f2b25b0a
+  size: 3527336
+  hash: md5
+  path: umap15_lm_celeba_hq_pipnet.h5
