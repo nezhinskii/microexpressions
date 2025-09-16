@@ -30,14 +30,15 @@ def normalize_landmarks(input_path, output_path, meanface_path):
     
     df = pd.read_hdf(input_path)
     coord_columns = [column for column in df.columns if re.match('[xy]\d+', column)]
+    other_columns = [column for column in df.columns if column not in [*coord_columns, 'filename']]
     norm_coord_columns = ['n_' + column for column in coord_columns]
     normalized_data = []
     for _, row in df.iterrows():
         points = row[coord_columns].values.astype(np.float32).reshape(68, 2)
         normalized_points = procrustes_normalization(points, normalized_meanface)
         normalized_flat = normalized_points.reshape(-1)
-        normalized_data.append([row['filename']] + normalized_flat.tolist())
-    result_df = pd.DataFrame(normalized_data, columns=['filename'] + norm_coord_columns)
+        normalized_data.append([row['filename']] + normalized_flat.tolist() + row[other_columns].to_list())
+    result_df = pd.DataFrame(normalized_data, columns=['filename'] + norm_coord_columns + other_columns)
     result_df.to_hdf(output_path, key='landmarks', mode='w', format='table')
 
 if __name__ == "__main__":

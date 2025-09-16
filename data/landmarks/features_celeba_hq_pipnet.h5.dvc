@@ -1,0 +1,5 @@
+outs:
+- md5: 93633f35d69287ed2ed1a4ac09722998
+  size: 615221
+  hash: md5
+  path: features_celeba_hq_pipnet.h5

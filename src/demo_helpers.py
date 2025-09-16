@@ -9,10 +9,12 @@ from io import BytesIO
 import os
 import numpy as np
 import cv2
+import re
 
 def plot_landmarks_cv2(image_path, landmarks, radius=1):
     img = cv2.imread(image_path)
     img_height, img_width = img.shape[:2]
+    landmarks = landmarks[[ind for ind in landmarks.index if re.match('(n_)?[xy]\d+', ind)]]
     for i in range(len(landmarks) // 2): 
         x = int(((landmarks[f"x{i}"] + 1) / 2) * img_width)
         y = int(((landmarks[f"y{i}"] + 1) / 2)  * img_height)
@@ -36,17 +38,15 @@ def plot_emb_with_images(df: pd.DataFrame, lm_df: pd.DataFrame, n_clusters=20, n
             except ValueError:
                 representatives.extend(cluster_points.to_dict('records'))
     reps_df = pd.DataFrame(representatives)
-    
-    
     fig = px.scatter(
         df,
         x='x0',
         y='x1',
-        color='cluster' if has_clusters else None,
+        color='color' if 'color' in df.columns else ('cluster' if has_clusters else None),
         hover_name='filename',
         opacity=0.4,
-        width=1200,
-        height=900,
+        width=1300,
+        height=700,
         title='2D Embedding Space with Representative Images'
     )
     

@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 import torchvision.models as models
+import cv2
 
 from facexformer import FaceXFormer
 from pipnet import Pip_resnet101, get_meanface, forward_pip
@@ -108,7 +109,48 @@ def get_landmarks_pipnet(model, batch_images, reverse_index1, reverse_index2, ma
         landmark_output.append(lms_pred_merge)
     
     return torch.stack(landmark_output)
-    
+
+model_points = np.array([
+    (0.0, 0.0, 0.0),             # Nose tip (30)
+    (0.0, 330.0, -65.0),        # Chin (8)
+    (-225.0, -170.0, -135.0),     # Left eye left corner (36)
+    (225.0, -170.0, -135.0),      # Right eye right corner (45)
+    (-150.0, 150.0, -125.0),    # Left mouth corner (48)
+    (150.0, 150.0, -125.0)      # Right mouth corner (54)
+], dtype="double")
+landmark_indices = [30, 8, 36, 45, 48, 54]
+def get_angles(landmarks, img_size):
+    width = height = img_size
+    image_points = []
+    for i in landmark_indices:
+        x_norm = landmarks[f'x{i}']
+        y_norm = landmarks[f'y{i}']
+        x_pixel = (x_norm + 1) / 2 * width
+        y_pixel = (y_norm + 1) / 2 * height
+        image_points.append((x_pixel, y_pixel))
+    image_points = np.array(image_points, dtype=np.float64)
+
+    focal_length = width
+    center = (width / 2, height / 2)
+    camera_matrix = np.array([
+        [focal_length, 0, center[0]],
+        [0, focal_length, center[1]],
+        [0, 0, 1]
+    ], dtype=np.float64)
+    dist_coeffs = np.zeros((4, 1))
+
+    _, rotation_vector, translation_vector = cv2.solvePnP(
+        model_points, image_points, camera_matrix, dist_coeffs
+    )
+
+    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
+    mat = np.hstack((rotation_matrix, translation_vector))
+    _, _, _, _, _, _, eulerAngles = cv2.decomposeProjectionMatrix(mat)
+    yaw = eulerAngles[1][0]
+    pitch = eulerAngles[0][0]
+    roll = eulerAngles[2][0]
+    return yaw, pitch, roll
+
 def get_landmarks(input_path, input_name, output_path, model_path, model_type, device="cuda:0", batch_size=32, meanface_path=None):
     os.makedirs(output_path, exist_ok=True)
     model, extra_data = load_model(model_type, model_path, device, meanface_path)
@@ -135,6 +177,10 @@ def get_landmarks(input_path, input_name, output_path, model_path, model_type, d
             for i in range(68):
                 result[f'x{i}'] = landmarks[2 * i]
                 result[f'y{i}'] = landmarks[2 * i + 1]
+            yaw, pitch, roll = get_angles(result, batch_images.shape[2])
+            result['yaw'] = yaw
+            result['pitch'] = pitch
+            result['roll'] = roll
             results.append(result)
     
     df = pd.DataFrame(results)
@@ -145,10 +191,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="Path to input images")
     parser.add_argument("--input_name", help="Input dataset name")
-    parser.add_argument("--output", required=True, help="Path to save aligned faces")
-    parser.add_argument("--model", required=True, help="Path to YOLO model")
+    parser.add_argument("--output", required=True, help="Path to save aligned faces (df dir)")
+    parser.add_argument("--model", required=True, help="Path to model")
     parser.add_argument("--model_type", required=True, choices=["facexformer", "pipnet"], help="Model type")
-    parser.add_argument("--meanface_path", help="Path to meanface.txt (for pipnet)")
+    parser.add_argument("--meanface_path", required=True, help="Path to meanface.txt (for pipnet)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--device", default="cuda:0", help="Device to run model on")
     args = parser.parse_args()

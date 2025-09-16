@@ -11,8 +11,9 @@ from sklearn.manifold import trustworthiness
 
 def reduce_landmarks(input_path, output_path, type, out_dim, random_state):
     df = pd.read_hdf(input_path)
-    coord_columns = [column for column in df.columns if re.match(r'n_[xy]\d+', column)]
-    X = df[coord_columns].values
+    reducing_columns = [column for column in df.columns if re.match(r'(n_)?[xy]\d+', column)]
+    other_columns = [column for column in df.columns if column not in reducing_columns]
+    X = df[reducing_columns].values
 
     if type == "umap":
         reducer = UMAP(
@@ -32,7 +33,7 @@ def reduce_landmarks(input_path, output_path, type, out_dim, random_state):
     
     umap_columns = [f'x{i}' for i in range(out_dim)]
     result_df = pd.DataFrame(embeddings, columns=umap_columns)
-    result_df['filename'] = df['filename']
+    result_df[other_columns] = df[other_columns]
     result_df.to_hdf(output_path, key='data', mode='w')
     
     mlflow.log_metric("trustworthiness5", trustworthiness(X, embeddings, n_neighbors=5))

@@ -8,11 +8,11 @@ from tqdm import tqdm
 import mlflow
 
 
-def detect_faces(image_path, model, device="cuda:0"):
+def detect_faces(image_path, model, device="cuda:0", conf=0.2, iou=0.5):
     image = cv2.imread(image_path)
     if isinstance(model, str):
         model = YOLO(model)
-    results = model.predict(image_path, device=device, conf=0.02, iou=0.5, verbose=False)
+    results = model.predict(image_path, device=device, conf=conf, iou=iou, verbose=False)
 
     detections = []
     for result in results:
@@ -102,7 +102,7 @@ def align_face(image, landmarks, bbox, output_size=(128, 128)):
     return final_image
 
 
-def process_images_celeba(input_path, output_path, model_path, device="cuda:0", output_size=(128, 128), conf=0.02, iou=0.5):
+def process_images_celeba(input_path, output_path, model_path, device="cuda:0", output_size=(256, 256), conf=0.2, iou=0.5):
     os.makedirs(output_path, exist_ok=True)
     model = YOLO(model_path)
     
@@ -115,7 +115,7 @@ def process_images_celeba(input_path, output_path, model_path, device="cuda:0", 
         if img_file.endswith((".jpg", ".png")):
             total_images += 1
             img_path = os.path.join(input_path, img_file)
-            image, detections = detect_faces(img_path, model, device)
+            image, detections = detect_faces(img_path, model, device, conf, iou)
             if not detections:
                 logger.info(f"No faces detected in {img_file}, skipping")
                 faces_skipped += 1
@@ -151,8 +151,8 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True, help="Path to save aligned faces")
     parser.add_argument("--model", required=True, help="Path to YOLO model")
     parser.add_argument("--device", default="cuda:0", help="Device to run model on")
-    parser.add_argument("--output-size", default="128x128", help="Output size as WIDTHxHEIGHT")
-    parser.add_argument("--conf", type=float, default=0.02, help="Confidence threshold for YOLO")
+    parser.add_argument("--output-size", default="256x256", help="Output size as WIDTHxHEIGHT")
+    parser.add_argument("--conf", type=float, default=0.2, help="Confidence threshold for YOLO")
     parser.add_argument("--iou", type=float, default=0.5, help="IOU threshold for YOLO")
     args = parser.parse_args()
     output_size = tuple(map(int, args.output_size.split('x')))

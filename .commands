@@ -1,0 +1,9 @@
+python .\src\alignment.py --input "data\raw\celeba_hq" --output "data\processed\aligned_celeba_hq" --model "models\yolov8n-face.pt" --device "cuda:0"
+
+python .\src\landmarks.py --input "data\processed\aligned_celeba_hq" --input_name "celeba_hq" --output "data\landmarks" --model "models\pipnet.pth" --model_type "pipnet" --meanface_path "models\meanface.txt" --device "cuda:0"
+
+python .\src\procrustes.py --input "data\landmarks\lm_celeba_hq_pipnet.h5" --output "data\landmarks\pr_lm_celeba_hq_pipnet.h5" --meanface_path "models\meanface.txt"
+
+python .\src\extract_facial_features_and_filter.py --input "data\landmarks\pr_lm_celeba_hq_pipnet.h5" --output "data\landmarks\features_celeba_hq_pipnet.h5"
+
+python .\src\reduce.py --input "data\landmarks\pr_lm_celeba_hq_pipnet.h5" --output "data\landmarks\umap2_lm_celeba_hq_pipnet.h5" --type umap --out_dim 2 
