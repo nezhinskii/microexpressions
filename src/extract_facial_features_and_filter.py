@@ -35,7 +35,7 @@ def get_local_outlier_factor(df, angles_filter, outliers_dim = 15, random_state 
 
 def get_clusters(df, angles_filter, clustering_dim = 2, random_state = 42, verbose = True):
     reduced_df = reduce(df, clustering_dim, random_state, verbose)
-    dbscan = DBSCAN()
+    dbscan = DBSCAN(min_samples = 10)
     coord_columns = [column for column in reduced_df.columns if re.match(r'(n_)?[xy]\d+', column)]
     return dbscan.fit_predict(reduced_df[angles_filter][coord_columns])
 
@@ -103,17 +103,21 @@ def extract_features(df):
     return feature_names, features
 
 def extract_facial_features_and_filter(input_path, output_path, yaw_threshold = 7, pitch_threshold = 7, outliers_dim = 15, 
-                                       clustering_dim = 2, lof_threshold = 1.15, random_state = 42):
+                                       clustering_dim = 2, lof_enabled = False, lof_threshold = 1.15, random_state = 42):
     pr_lm_df = pd.read_hdf(input_path)
     angles_filter = get_angles_filter(pr_lm_df, yaw_threshold, pitch_threshold)
 
-    lof_scores = get_local_outlier_factor(pr_lm_df, angles_filter, outliers_dim, random_state)
+    if lof_enabled:
+        lof_scores = get_local_outlier_factor(pr_lm_df, angles_filter, outliers_dim, random_state)
     clusters = get_clusters(pr_lm_df, angles_filter, clustering_dim, random_state)
 
     values, counts = np.unique(clusters[clusters >= 0], return_counts=True)
     main_cluster = values[counts.argmax()]
 
-    filtered_pr_lm_df = pr_lm_df[angles_filter][(clusters == main_cluster) & (lof_scores < lof_threshold)]
+    if lof_enabled:
+        filtered_pr_lm_df = pr_lm_df[angles_filter][(clusters == main_cluster) & (lof_scores < lof_threshold)]
+    else:
+        filtered_pr_lm_df = pr_lm_df[angles_filter][clusters == main_cluster]
 
     feature_names, features = extract_features(filtered_pr_lm_df)
     mlflow.log_param('feature_names', feature_names)
@@ -126,12 +130,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="Path to input normalized landmarks")
     parser.add_argument("--output", required=True, help="Path to facial features df")
-    parser.add_argument("--outliers_dim", default=15, help="Dimension of the reduced space for outlier search")
-    parser.add_argument("--clustering_dim", default=2, help="Dimension of the reduced space for clustering")
-    parser.add_argument("--yaw_threshold", default=7, help="Yaw filter threshold")
-    parser.add_argument("--pitch_threshold", default=7, help="Pitch filter threshold")
-    parser.add_argument("--lof_threshold", default=1.15, help="LOF threshold")
-    parser.add_argument("--random_state", default=42, help="Random state")
+    parser.add_argument("--outliers_dim", type=int, default=15, help="Dimension of the reduced space for outlier search")
+    parser.add_argument("--clustering_dim", type=int, default=2, help="Dimension of the reduced space for clustering")
+    parser.add_argument("--yaw_threshold", type=int, default=7, help="Yaw filter threshold")
+    parser.add_argument("--pitch_threshold", type=int, default=7, help="Pitch filter threshold")
+    parser.add_argument("--lof_enabled", action="store_true", help="Enable LOF filtering")
+    parser.add_argument("--lof_threshold", type=np.float64, default=1.1, help="LOF threshold")
+    parser.add_argument("--random_state", type=int, default=42, help="Random state")
     args = parser.parse_args()
         
     mlflow.set_experiment("filtering & feature extraction")
@@ -142,6 +147,7 @@ if __name__ == "__main__":
         mlflow.log_param("clustering_dim", args.clustering_dim)
         mlflow.log_param("yaw_threshold", args.yaw_threshold)
         mlflow.log_param("pitch_threshold", args.pitch_threshold)
+        mlflow.log_param("lof_enabled", args.lof_enabled)
         mlflow.log_param("lof_threshold", args.lof_threshold)
         extract_facial_features_and_filter(args.input, args.output, args.yaw_threshold, args.pitch_threshold, args.outliers_dim, 
-                                        args.clustering_dim, args.lof_threshold, args.random_state)
+                                        args.clustering_dim, args.lof_enabled, args.lof_threshold, args.random_state)
