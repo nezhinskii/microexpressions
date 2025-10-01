@@ -151,6 +151,17 @@ def get_angles(landmarks, img_size):
     roll = eulerAngles[2][0]
     return yaw, pitch, roll
 
+def run_landmark_model(model_type, model, batch_images, extra_data, device):
+    if model_type == "facexformer":
+        return get_landmarks_facexformer(model, batch_images, device)
+    elif model_type == "pipnet":
+        return get_landmarks_pipnet(
+            model, batch_images,
+            extra_data["reverse_index1"],
+            extra_data["reverse_index2"],
+            extra_data["max_len"]
+        )
+
 def get_landmarks(input_path, input_name, output_path, model_path, model_type, device="cuda:0", batch_size=32, meanface_path=None):
     os.makedirs(output_path, exist_ok=True)
     model, extra_data = load_model(model_type, model_path, device, meanface_path)
@@ -162,15 +173,8 @@ def get_landmarks(input_path, input_name, output_path, model_path, model_type, d
     for batch_images, batch_filenames in tqdm(dataloader, desc="Processing batches"):
         batch_images = batch_images.to(device)
         
-        if model_type == "facexformer":
-            landmark_output = get_landmarks_facexformer(model, batch_images, device)
-        elif model_type == "pipnet":
-            landmark_output = get_landmarks_pipnet(
-                model, batch_images,
-                extra_data["reverse_index1"],
-                extra_data["reverse_index2"],
-                extra_data["max_len"]
-            )
+        landmark_output = run_landmark_model(model_type, model, batch_images, extra_data, device)
+
         for filename, landmarks in zip(batch_filenames, landmark_output):
             landmarks = landmarks.cpu().numpy().flatten()
             result = {'filename': filename}

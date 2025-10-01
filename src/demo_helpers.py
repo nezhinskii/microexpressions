@@ -11,6 +11,11 @@ import numpy as np
 import cv2
 import re
 
+def find_with_extension(folder_path, extension):
+    for file in os.listdir(folder_path):
+        if file.endswith(extension):
+            return os.path.join(folder_path, file)
+
 def plot_landmarks_cv2(image_path, landmarks, radius=1):
     img = cv2.imread(image_path)
     img_height, img_width = img.shape[:2]
