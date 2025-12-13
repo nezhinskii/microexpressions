@@ -6,33 +6,52 @@ import logging
 from ultralytics import YOLO
 from tqdm import tqdm
 import mlflow
+import torch
+import onnxruntime as ort
 
+from yolov6face import preprocess_image
+from yolov6face import non_max_suppression_face, rescale_detections
 
-def detect_faces(image_path, model, device="cuda:0", conf=0.25, iou=0.7):
+def create_session(model_path: str):
+    providers = [
+        'CUDAExecutionProvider',
+        'CPUExecutionProvider',
+    ]
+    session = ort.InferenceSession(
+        model_path,
+        providers=providers,
+        provider_options=None
+    )
+    return session
+
+def detect_faces(image_path, session, input_name=None, conf=0.25, iou=0.7):
+    if isinstance(session, str):
+        session = create_session(session)
+    if input_name is None:
+        input_name = session.get_inputs()[0].name
+
     image = cv2.imread(image_path)
-    if isinstance(model, str):
-        model = YOLO(model)
-    results = model.predict(image, device=device, conf=conf, iou=iou, verbose=False)
 
-    detections = []
+    rgb_image, prepared_data = preprocess_image(image)
+
+    batch_tensor = prepared_data[0]
+    batch_tensor = batch_tensor.astype(np.float32) / 255.0
+
+    ort_outs = session.run(None, {input_name: batch_tensor})
+    prediction = torch.from_numpy(ort_outs[0])
+
+    dets = non_max_suppression_face(
+        prediction.unsqueeze(0),
+        conf_thres=conf,
+        iou_thres=iou,
+        max_det=300
+    )
+    results = rescale_detections(dets, [prepared_data])[0]
     for result in results:
-        boxes = result.boxes.xyxy.cpu().numpy()
-        scores = result.boxes.conf.cpu().numpy()
-        if hasattr(result, "keypoints") and result.keypoints is not None:
-            landmarks = result.keypoints.xy.cpu().numpy()
-        else:
-            continue
+        result['landmarks'] = np.array(result['landmarks']).reshape((-1, 2))
+    return rgb_image, results
 
-        for box, score, lm in zip(boxes, scores, landmarks):
-            detections.append({
-                'bbox': box.tolist(),
-                'score': float(score),
-                'landmarks': lm.tolist()
-            })
-
-    return image, detections
-
-def align_face(image, landmarks, bbox, output_size=(128, 128)):
+def align_face(image, landmarks, bbox, output_size=(256, 256)):
     left_eye = landmarks[0]
     right_eye = landmarks[1]
     nose = landmarks[2]
@@ -104,18 +123,19 @@ def align_face(image, landmarks, bbox, output_size=(128, 128)):
 
 def process_images_celeba(input_path, output_path, model_path, device="cuda:0", output_size=(256, 256), conf=0.25, iou=0.7):
     os.makedirs(output_path, exist_ok=True)
-    model = YOLO(model_path)
+    session = create_session(model_path)
+    input_name = session.get_inputs()[0].name
     
     total_images = 0
     faces_processed = 0
     faces_skipped = 0
     image_files = [f for f in os.listdir(input_path) if f.endswith((".jpg", ".png"))]
 
-    for img_file in tqdm(image_files, desc="Processing images", unit="image"):
+    for img_file in tqdm(image_files[:5], desc="Processing images", unit="image"):
         if img_file.endswith((".jpg", ".png")):
             total_images += 1
             img_path = os.path.join(input_path, img_file)
-            image, detections = detect_faces(img_path, model, device, conf, iou)
+            image, detections = detect_faces(img_path, session, input_name, conf, iou)
             if not detections:
                 logger.info(f"No faces detected in {img_file}, skipping")
                 faces_skipped += 1
@@ -124,7 +144,7 @@ def process_images_celeba(input_path, output_path, model_path, device="cuda:0", 
                 try:
                     aligned_image = align_face(image, np.array(detections[0]["landmarks"]), detections[0]["bbox"], output_size=output_size)
                     output_file = os.path.join(output_path, f"aligned_{img_file}")
-                    cv2.imwrite(output_file, aligned_image)
+                    cv2.imwrite(output_file, cv2.cvtColor(aligned_image, cv2.COLOR_BGR2RGB))
                     logger.info(f"Saved aligned face for {img_file} to {output_file}")
                     faces_processed += 1
                     if faces_processed <= 5:
@@ -167,4 +187,4 @@ if __name__ == "__main__":
         mlflow.log_param("conf", args.conf)
         mlflow.log_param("iou", args.iou)
 
-        process_images_celeba(args.input, args.output, args.model, args.device, output_size, args.conf, args.iou)
+    process_images_celeba(args.input, args.output, args.model, args.device, output_size, args.conf, args.iou)

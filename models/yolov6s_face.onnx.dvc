@@ -1,0 +1,5 @@
+outs:
+- md5: fd946826acde0b8148719955e5aef062
+  size: 49718917
+  hash: md5
+  path: yolov6s_face.onnx

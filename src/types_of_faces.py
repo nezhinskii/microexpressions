@@ -6,12 +6,19 @@ from sklearn.preprocessing import StandardScaler
 import mlflow
 import joblib
 
-clust_columns = ['eye_distance', 'eyes_mouth_distance']
+CLUST_COLUMNS = ['eye_distance', 'eyes_mouth_distance']
+
+def get_fragment_features_center(fragment_features_df: pd.DataFrame, scaler_path:str = r'models\types_of_faces\scaler.pkl'):
+    scaler = joblib.load(scaler_path)
+    X = fragment_features_df[CLUST_COLUMNS]
+    X_scaled = scaler.transform(X)
+    return X_scaled.mean()
+
 def get_cells_for_new_points(new_df, scaler_path = r'models\types_of_faces\scaler.pkl', quantiles_path = r'models\types_of_faces\quantiles_df.csv'):
     scaler = joblib.load(scaler_path)
-    X = new_df[clust_columns]
+    X = new_df[CLUST_COLUMNS]
     X_scaled = scaler.transform(X)
-    df_scaled = pd.DataFrame(X_scaled, columns=clust_columns)
+    df_scaled = pd.DataFrame(X_scaled, columns=CLUST_COLUMNS)
     quantiles_df = pd.read_csv(quantiles_path)
 
     x_quantiles = quantiles_df['x_quantiles'].to_numpy()
@@ -32,10 +39,10 @@ def get_cells_for_new_points(new_df, scaler_path = r'models\types_of_faces\scale
     return cells
 
 def get_cells(df, n_sigma=3, axis_cells=5):
-    X = df[clust_columns]
+    X = df[CLUST_COLUMNS]
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    df_scaled = pd.DataFrame(X_scaled, columns=clust_columns)
+    df_scaled = pd.DataFrame(X_scaled, columns=CLUST_COLUMNS)
     joblib.dump(scaler, r'models\types_of_faces\scaler.pkl')
 
     is_outlier = (np.abs(df_scaled) > n_sigma).any(axis=1)
