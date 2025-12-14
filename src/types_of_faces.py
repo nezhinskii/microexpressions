@@ -12,7 +12,7 @@ def get_fragment_features_center(fragment_features_df: pd.DataFrame, scaler_path
     scaler = joblib.load(scaler_path)
     X = fragment_features_df[CLUST_COLUMNS]
     X_scaled = scaler.transform(X)
-    return X_scaled.mean()
+    return X_scaled.mean(axis=0)
 
 def get_cells_for_new_points(new_df, scaler_path = r'models\types_of_faces\scaler.pkl', quantiles_path = r'models\types_of_faces\quantiles_df.csv'):
     scaler = joblib.load(scaler_path)

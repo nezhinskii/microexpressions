@@ -110,15 +110,15 @@ def find_with_extension(folder_path, extension):
             return os.path.join(folder_path, file)
 
 def process_dataset(
-    base_path:str,
-    output_base_path: str,
-    detect_model_path: str,
-    lm_model_type: str,
-    lm_model_path: str,
-    meanface_path: str,
-    aligned_size:tuple[int, int] = (256, 256), 
-    device:str = 'cuda:0',
-    fps:int = 30
+    base_path:str=r'data\raw\casme3_partA',
+    output_base_path:str=r'data\me_landmarks\casme3',
+    detect_model_path:str=r'models\yolov6s_face.onnx',
+    lm_model_type:str=r'pipnet',
+    lm_model_path:str=r'models\pipnet.pth',
+    meanface_path:str=r'models\meanface.txt',
+    aligned_size:tuple[int, int]=(256, 256), 
+    device:str='cuda:0',
+    fps:int=30
 ):
     detect_session = create_session(detect_model_path)
     lm_model, lm_extra_data = load_model(lm_model_type, lm_model_path, device, meanface_path)
@@ -156,16 +156,33 @@ def process_dataset(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Base path to ME dataset")
-    parser.add_argument("--output", required=True, help="Path to save processed fragments")
-    parser.add_argument("--detection_model", required=True, help="Path to detection model")
-    parser.add_argument("--lm_model_type", required=True, choices=["facexformer", "pipnet"], help="Landmark model type")
-    parser.add_argument("--lm_model", required=True, help="Path to landmark model")
-    parser.add_argument("--meanface_path", required=True, help="Path to meanface.txt (for pipnet)")
-    parser.add_argument("--aligned_size", default="256x256", help="Output size as WIDTHxHEIGHT")
-    parser.add_argument("--device", default="cuda:0", help="Device to run model on")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", default=r'data\raw\casme3_partA',
+                        help="Base path to ME dataset")
+    parser.add_argument("--output", default=r'data\me_landmarks\casme3',
+                        help="Path to save processed fragments")
+    parser.add_argument("--detection_model", default=r'models\yolov6s_face.onnx',
+                        help="Path to detection model (YOLO face)")
+    parser.add_argument("--lm_model_type", default='pipnet',
+                        choices=["facexformer", "pipnet"],
+                        help="Landmark model type")
+    parser.add_argument("--lm_model", default=r'models\pipnet.pth',
+                        help="Path to landmark model")
+    parser.add_argument("--meanface_path", default=r'models\meanface.txt',
+                        help="Path to meanface.txt (for pipnet)")
+    parser.add_argument("--aligned_size", default="256x256",
+                        help="Output size as WIDTHxHEIGHT (e.g. 256x256)")
+    parser.add_argument("--device", default="cuda:0",
+                        help="Device to run models on (e.g. cuda:0 or cpu)")
+    parser.add_argument("--fps", type=int, default=30,
+                        help="FPS for processing video fragments")
     args = parser.parse_args()
-    aligned_size = tuple(map(int, args.aligned_size.split('x')))
+    
+    if isinstance(args.aligned_size, str):
+        aligned_size = tuple(map(int, args.aligned_size.split('x')))
+    else:
+        aligned_size = args.aligned_size
+    
     process_dataset(
         base_path=args.input,
         output_base_path=args.output,
@@ -173,6 +190,7 @@ if __name__ == "__main__":
         lm_model_type=args.lm_model_type,
         lm_model_path=args.lm_model,
         meanface_path=args.meanface_path,
-        aligned_size=aligned_size, 
-        device=args.device
+        aligned_size=aligned_size,
+        device=args.device,
+        fps=args.fps
     )

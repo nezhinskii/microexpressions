@@ -10,6 +10,7 @@ python .\src\types_of_faces.py --input "data\landmarks\features_celeba_hq_pipnet
 
 python .\src\preprocess_me_data.py --input "data\raw\casme3_partA" --output "data\me_landmarks\casme3" --detection_model "models\yolov6s_face.onnx" --lm_model_type "pipnet" --lm_model "models\pipnet.pth" --meanface_path "models\meanface.txt"
 
+python .\src\augment.py 
 
 
 
