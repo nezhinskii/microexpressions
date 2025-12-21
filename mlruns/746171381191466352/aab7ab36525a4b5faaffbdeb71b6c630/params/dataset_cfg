@@ -1,0 +1,1 @@
+DatasetConfig(data_root='data/augmented/casme3', labels_path='data/augmented/casme3/labels.xlsx', val_size=0.2, subject_independent=True, include_augmented=False, seed=1, target_col='Objective class')

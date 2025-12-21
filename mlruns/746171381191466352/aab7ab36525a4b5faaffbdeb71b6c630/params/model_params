@@ -1,0 +1,1 @@
+{'gnn_hidden_dims': [32, 64, 128], 'gnn_fusion_dim': 256, 'gnn_dropout': 0.2, 'transformer_num_layers': 4, 'transformer_num_heads': 8, 'transformer_ff_dim': None, 'transformer_dropout': 0.1, 'transformer_use_cls_token': True}
