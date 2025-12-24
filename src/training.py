@@ -13,7 +13,7 @@ from sklearn.model_selection import train_test_split
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from model import FacialGNN, FacialTemporalTransformer, MicroExpressionModel
-
+from focal_loss import FocalLoss
 def set_seed(seed: int = 1):
     random.seed(seed)
     np.random.seed(seed)
@@ -153,7 +153,7 @@ def me_collate_fn(batch):
 
 def _build_dataloaders(
     data_root, labels_path, val_size, subject_independent,
-    include_augmented, seed, target_col, batch_size
+    include_augmented, seed, target_col, batch_size, drop_others
 ):
     train_list, val_list, label_map = prepare_microexpression_datasets(
         data_root=data_root,
@@ -165,13 +165,59 @@ def _build_dataloaders(
         target_col=target_col,
     )
 
-    train_dataset = MicroExpressionDataset(train_list, label_map)
-    val_dataset = MicroExpressionDataset(val_list, label_map)
+    class_mapping = {
+        'happy':        'Positive',
+        'happiness':    'Positive',
+
+        'surprise':     'Surprise',
+
+        'disgust':      'Negative',
+        'fear':         'Negative',
+        'anger':        'Negative',
+        'sad':          'Negative',
+        'sadness':      'Negative',
+        'contempt':     'Negative',
+
+        'others':       'Others',
+        'repression':   'Others',
+        'tense':        'Others'
+    }
+
+    def remap_sample_list(sample_list):
+        remapped = []
+        for csv_path, label_str in sample_list:
+            label_str = label_str.lower().strip()
+            new_label = class_mapping.get(label_str, 'Others')
+            remapped.append((csv_path, new_label))
+        return remapped
+    
+    train_list_remapped = remap_sample_list(train_list)
+    val_list_remapped   = remap_sample_list(val_list)
+
+    if drop_others:
+        train_list_remapped = [s for s in train_list_remapped if s[1] != 'Others']
+        val_list_remapped   = [s for s in val_list_remapped   if s[1] != 'Others']
+        print("Dropped 'Others' class after remapping.")
+    else:
+        print("Kept 'Others' class after remapping.")
+
+    unique_labels = sorted(set(label for _, label in train_list_remapped + val_list_remapped))
+    label_map = {label: idx for idx, label in enumerate(unique_labels)}
+    num_classes = len(unique_labels)
+
+    train_labels = [label for _, label in train_list_remapped]
+    val_labels   = [label for _, label in val_list_remapped]
+    print(f"Classes after remapping: {unique_labels}")
+    print("Train distribution:", {k: train_labels.count(k) / len(train_labels) for k in unique_labels})
+    print("Val distribution:  ", {k: val_labels.count(k)   / len(val_labels)   for k in unique_labels})
+
+    train_dataset = MicroExpressionDataset(train_list_remapped, label_map)
+    val_dataset = MicroExpressionDataset(val_list_remapped, label_map)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=me_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=me_collate_fn)
 
-    train_labels_str = [sample[1] for sample in train_list]
+    train_labels_str = [sample[1] for sample in train_list_remapped]
     train_labels_int = [label_map[label] for label in train_labels_str]
 
     class_counts = Counter(train_labels_int)
@@ -184,7 +230,7 @@ def _build_dataloaders(
     weights = torch.tensor(weights, dtype=torch.float)
     weights = weights / weights.sum() * num_classes
 
-    return train_loader, val_loader, label_map, weights, len(train_dataset), len(val_dataset)
+    return train_loader, val_loader, label_map, weights, len(train_dataset), len(val_dataset), class_mapping
 
 def _build_model(num_classes, transformer_embed_dim, **model_params):
     gnn_hidden_dims = model_params.get("gnn_hidden_dims", [32, 64, 128])
@@ -275,11 +321,12 @@ class DatasetConfig:
     include_augmented: bool = False
     seed: int = 1
     target_col: str = 'Objective class'
+    drop_others: bool = True
 
 @dataclass
 class TrainingConfig:
-    batch_size: int = 4
-    lr: float = 1e-4
+    batch_size: int = 8
+    lr: float = 3e-4
     weight_decay: float = 1e-2
     num_epochs: int = 100
     patience_early_stop: int = 10
@@ -289,12 +336,12 @@ class TrainingConfig:
 @dataclass
 class GNNConfig:
     hidden_dims: list[int] = field(default_factory=lambda: [32, 64, 128])
-    fusion_dim: int | None = 256
+    fusion_dim: int | None = None
     dropout: float = 0.2
 
 @dataclass
 class TransformerConfig:
-    embed_dim: int = 256
+    embed_dim: int = 128
     num_layers: int = 4
     num_heads: int = 8
     ff_dim: int | None = None
@@ -311,7 +358,7 @@ def train(
     print(f"Using device: {device}")
 
     # 1. Data
-    train_loader, val_loader, label_map, weights, train_samples, val_samples = _build_dataloaders(
+    train_loader, val_loader, label_map, weights, train_samples, val_samples, class_mapping = _build_dataloaders(
         data_root=dataset_cfg.data_root,
         labels_path=dataset_cfg.labels_path,
         val_size=dataset_cfg.val_size,
@@ -320,6 +367,7 @@ def train(
         seed=dataset_cfg.seed,
         target_col=dataset_cfg.target_col,
         batch_size=training_cfg.batch_size,
+        drop_others=dataset_cfg.drop_others
     )
     weights = weights.to(device)
 
@@ -342,7 +390,7 @@ def train(
     # 3. Optimizer & co
     criterion = torch.nn.CrossEntropyLoss(weight=weights)
     optimizer = AdamW(model.parameters(), lr=training_cfg.lr, weight_decay=training_cfg.weight_decay)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=7, verbose=True)
 
     mlflow.set_experiment('ME_model_training')
     with mlflow.start_run() as run:
@@ -356,7 +404,7 @@ def train(
         last_path = save_dir / "last_model.pth"
         best_path = save_dir / "best_model.pth"
 
-        best_val_loss = float('inf')
+        best_val_f1 = 0.0
         early_stop_counter = 0
 
         for epoch in range(training_cfg.num_epochs):
@@ -380,17 +428,17 @@ def train(
             torch.save(model.state_dict(), last_path)
             mlflow.log_artifact(str(last_path), "checkpoints")
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if val_f1 > best_val_f1:
+                best_val_f1 = val_f1
                 torch.save(model.state_dict(), best_path)
                 mlflow.log_artifact(str(best_path), "checkpoints")
                 early_stop_counter = 0
-                print(f"*** New best: {val_loss:.4f} ***")
+                print(f"*** New best: {val_f1:.4f} ***")
             else:
                 early_stop_counter += 1
 
             print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} "
-                  f"| Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f} | Best Val Loss: {best_val_loss:.4f}")
+                  f"| Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f} | Best Val F1: {best_val_f1:.4f}")
 
             if early_stop_counter >= training_cfg.patience_early_stop:
                 print("Early stopping")
@@ -413,15 +461,17 @@ if __name__ == "__main__":
     parser.add_argument('--no_subject_independent', action='store_false', dest='subject_independent')
     parser.add_argument('--include_augmented', action='store_true', default=False)
     parser.add_argument('--seed', type=int, default=1)
-    parser.add_argument('--target_col', type=str, default='Objective class')
+    parser.add_argument('--target_col', type=str, default='emotion')
+    parser.add_argument('--drop_others', action='store_true', default=True, help="Drop samples with 'others' class after remapping to 3-class scheme")
+    parser.add_argument('--no_drop_others', action='store_false', dest='drop_others')
 
     # ==================== TrainingConfig ====================
-    parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=1e-2)
-    parser.add_argument('--num_epochs', type=int, default=100)
-    parser.add_argument('--patience_early_stop', type=int, default=10)
-    parser.add_argument('--grad_clip_max_norm', type=float, default=1.0)
+    parser.add_argument('--num_epochs', type=int, default=200)
+    parser.add_argument('--patience_early_stop', type=int, default=40)
+    parser.add_argument('--grad_clip_max_norm', type=float, default=5.0)
     parser.add_argument('--device', type=str, choices=['cuda', 'cpu'], default='cuda')
 
     # ==================== GNNConfig ====================
@@ -432,7 +482,7 @@ if __name__ == "__main__":
     # ==================== TransformerConfig ====================
     parser.add_argument('--transformer_embed_dim', type=int, default=256)
     parser.add_argument('--transformer_num_layers', type=int, default=4)
-    parser.add_argument('--transformer_num_heads', type=int, default=8)
+    parser.add_argument('--transformer_num_heads', type=int, default=4)
     parser.add_argument('--transformer_ff_dim', type=int, default=None, help="Use negative value (e.g. -1) to set None")
     parser.add_argument('--transformer_dropout', type=float, default=0.1)
     parser.add_argument('--use_cls_token', action='store_true', default=True)
@@ -448,6 +498,7 @@ if __name__ == "__main__":
         include_augmented=args.include_augmented,
         seed=args.seed,
         target_col=args.target_col,
+        drop_others=args.drop_others
     )
 
     training_cfg = TrainingConfig(
@@ -460,17 +511,23 @@ if __name__ == "__main__":
         device=args.device,
     )
 
+    gnn_fusion_dim = args.gnn_fusion_dim
+    if (args.gnn_fusion_dim is None) or (args.gnn_fusion_dim < 0):
+        gnn_fusion_dim = None 
     gnn_cfg = GNNConfig(
         hidden_dims=args.gnn_hidden_dims,
-        fusion_dim=args.gnn_fusion_dim,
+        fusion_dim=gnn_fusion_dim,
         dropout=args.gnn_dropout,
     )
 
+    transformer_ff_dim = args.transformer_ff_dim
+    if (args.transformer_ff_dim is None) or (args.transformer_ff_dim < 0):
+        transformer_ff_dim = None 
     transformer_cfg = TransformerConfig(
         embed_dim=args.transformer_embed_dim,
         num_layers=args.transformer_num_layers,
         num_heads=args.transformer_num_heads,
-        ff_dim=args.transformer_ff_dim,
+        ff_dim=transformer_ff_dim,
         dropout=args.transformer_dropout,
         use_cls_token=args.use_cls_token,
     )

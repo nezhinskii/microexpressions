@@ -2,6 +2,7 @@ import argparse
 import os
 import mlflow
 import torch
+import dlib
 from tqdm import tqdm
 import torchvision.transforms as transforms
 from PIL import Image
@@ -13,6 +14,7 @@ import cv2
 
 from facexformer import FaceXFormer
 from pipnet import Pip_resnet101, get_meanface, forward_pip
+from starnet import Alignment
 
 class ImageDataset(Dataset):
     def __init__(self, input_path, transform=None):
@@ -26,9 +28,11 @@ class ImageDataset(Dataset):
     def __getitem__(self, idx):
         filename = self.image_files[idx]
         image_path = os.path.join(self.input_path, filename)
-        image = Image.open(image_path).convert("RGB")
         if self.transform:
+            image = Image.open(image_path).convert("RGB")
             image = self.transform(image)
+        else:
+            image = cv2.imread(image_path)
         return image, filename
     
 def get_transforms(model_type):
@@ -44,10 +48,12 @@ def get_transforms(model_type):
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
+    elif model_type == "starnet":
+        return None
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
     
-def load_model(model_type, model_path, device, meanface_path=None):
+def load_model(model_type, model_path, device, face_detector_path=None, meanface_path=None):
     if model_type == "facexformer":
         model = FaceXFormer().to(device)
         checkpoint = torch.load(model_path, map_location=device)
@@ -72,6 +78,19 @@ def load_model(model_type, model_path, device, meanface_path=None):
         }
         model.eval()
         return model, extra_data
+    elif model_type == "starnet":
+        if face_detector_path is None:
+            raise ValueError("face_detector_path must be provided for starnet")
+        detector = dlib.get_frontal_face_detector()
+        sp = dlib.shape_predictor(face_detector_path)
+        args = argparse.Namespace()
+        args.config_name = 'alignment'
+        args.data_definition = '300W'
+        model = Alignment(args, model_path, dl_framework="pytorch", device=device)
+        return model, {
+            'detector':detector,
+            'sp':sp
+        }
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
     
@@ -104,11 +123,47 @@ def get_landmarks_pipnet(model, batch_images, reverse_index1, reverse_index2, ma
         tmp_x = torch.mean(torch.cat((lms_pred_x[idx].unsqueeze(1), tmp_nb_x), dim=1), dim=1).view(-1, 1)
         tmp_y = torch.mean(torch.cat((lms_pred_y[idx].unsqueeze(1), tmp_nb_y), dim=1), dim=1).view(-1, 1)
         lms_pred_merge = torch.cat((tmp_x, tmp_y), dim=1)
-        # Transform coordinates from [0, 1] to [-1, 1] for FaceXFormer compatibility
+        # Transform coordinates from [0, 1] to [-1, 1] for compatibility
         lms_pred_merge = 2 * lms_pred_merge - 1
         landmark_output.append(lms_pred_merge)
     
     return torch.stack(landmark_output)
+
+def get_landmarks_starnet(model, batch_images, detector, sp):
+    batch_res = []
+    for i, image in enumerate(batch_images):
+        if image is torch.Tensor:
+            np_image = image.cpu().numpy()
+        else:
+            np_image = image
+        dets = detector(np_image, 1)
+        num_faces = len(dets)
+        if num_faces == 0:
+            batch_res.append(None)
+            continue
+        face = sp(np_image, dets[0])
+        shape = []
+        for i in range(68):
+            x = face.part(i).x
+            y = face.part(i).y
+            shape.append((x, y))
+        shape = np.array(shape)
+        x1, x2 = shape[:, 0].min(), shape[:, 0].max()
+        y1, y2 = shape[:, 1].min(), shape[:, 1].max()
+        scale = min(x2 - x1, y2 - y1) / 200 * 1.05
+        center_w = (x2 + x1) / 2
+        center_h = (y2 + y1) / 2
+
+        scale, center_w, center_h = float(scale), float(center_w), float(center_h)
+        landmarks_pv = model.analyze(np_image, scale, center_w, center_h)
+        # Transform coordinates from [0, 1] to [-1, 1] for compatibility
+        norm_landmarks = np.zeros_like(landmarks_pv)
+        h, w, _ = np_image.shape
+        c_h, c_w = float(h)/2, float(w)/2
+        norm_landmarks[:, 0] = (landmarks_pv[:, 0] - c_w) / c_w
+        norm_landmarks[:, 1] = (landmarks_pv[:, 1] - c_h) / c_h
+        batch_res.append(norm_landmarks)
+    return torch.tensor(batch_res)
 
 model_points = np.array([
     (0.0, 0.0, 0.0),             # Nose tip (30)
@@ -161,10 +216,24 @@ def run_landmark_model(model_type, model, batch_images, extra_data, device):
             extra_data["reverse_index2"],
             extra_data["max_len"]
         )
+    elif model_type == "starnet":
+        return get_landmarks_starnet(
+            model, batch_images, extra_data["detector"], extra_data["sp"]
+        )
 
-def get_landmarks(input_path, input_name, output_path, model_path, model_type, device="cuda:0", batch_size=32, meanface_path=None):
+def get_landmarks(
+        input_path, 
+        input_name, 
+        output_path, 
+        model_path, 
+        model_type, 
+        device="cuda:0", 
+        batch_size = 32, 
+        face_detector_path:str = r'models\shape_predictor_68_face_landmarks.dat', 
+        meanface_path:str = r'models\meanface.txt'
+    ):
     os.makedirs(output_path, exist_ok=True)
-    model, extra_data = load_model(model_type, model_path, device, meanface_path)
+    model, extra_data = load_model(model_type, model_path, device, face_detector_path, meanface_path)
     transforms_image = get_transforms(model_type)
     
     dataset = ImageDataset(input_path, transform=transforms_image)
@@ -176,6 +245,9 @@ def get_landmarks(input_path, input_name, output_path, model_path, model_type, d
         landmark_output = run_landmark_model(model_type, model, batch_images, extra_data, device)
 
         for filename, landmarks in zip(batch_filenames, landmark_output):
+            if landmarks is None:
+                print(f'No face found on {filename}, skip...')
+                continue
             landmarks = landmarks.cpu().numpy().flatten()
             result = {'filename': filename}
             for i in range(68):
@@ -197,8 +269,9 @@ if __name__ == "__main__":
     parser.add_argument("--input_name", help="Input dataset name")
     parser.add_argument("--output", required=True, help="Path to save aligned faces (df dir)")
     parser.add_argument("--model", required=True, help="Path to model")
-    parser.add_argument("--model_type", required=True, choices=["facexformer", "pipnet"], help="Model type")
-    parser.add_argument("--meanface_path", required=True, help="Path to meanface.txt (for pipnet)")
+    parser.add_argument("--model_type", required=True, choices=["facexformer", "pipnet", "starnet"], help="Model type")
+    parser.add_argument("--meanface_path", default=r'models\meanface.txt', help="Path to meanface.txt (for pipnet)")
+    parser.add_argument("--face_detector_path", default=r'models\shape_predictor_68_face_landmarks.dat', help="Path to face detector (for starnet)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--device", default="cuda:0", help="Device to run model on")
     args = parser.parse_args()
@@ -211,7 +284,18 @@ if __name__ == "__main__":
         mlflow.log_param("model_path", args.model)
         mlflow.log_param("model_type", args.model_type)
         mlflow.log_param("meanface_path", args.meanface_path)
+        mlflow.log_param("face_detector_path", args.face_detector_path)
         mlflow.log_param("device", args.device)
         mlflow.log_param("batch_size", args.batch_size)
         
-        get_landmarks(args.input, args.input_name, args.output, args.model, args.model_type, args.device, args.batch_size, args.meanface_path)
+        get_landmarks(
+            args.input, 
+            args.input_name, 
+            args.output, 
+            args.model, 
+            args.model_type, 
+            args.device, 
+            args.batch_size, 
+            args.face_detector_path,
+            args.meanface_path
+        )

@@ -36,7 +36,8 @@ def proctrustes_fragment_frames(meanface_path, fragment_landmarks):
     normalized_meanface, _, _ = normalize_points(meanface)
 
     onset_lm = fragment_landmarks[0]
-    _, fixed_centroid, fixed_scale, fixed_R = procrustes_normalization(onset_lm.numpy(), normalized_meanface)
+    target_points_slice = slice(17, 68)
+    _, fixed_centroid, fixed_scale, fixed_R = procrustes_normalization(onset_lm.numpy()[target_points_slice], normalized_meanface[target_points_slice])
 
     def apply_fixed_procrustes(frame_points, fixed_centroid, fixed_scale, fixed_R):
         centered = frame_points - fixed_centroid
@@ -74,11 +75,16 @@ def process_fragment(
     aligned_frames = align_fragment_frames(fragment_path, detect_session, aligned_size, aligned_path, input_name, True)
 
     # landmark
-    pil_frames = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in aligned_frames]
-    transformed_frames = torch.stack([lm_model_transforms(frame) for frame in pil_frames])
+    if lm_model_transforms is None:
+        transformed_frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in aligned_frames]
+    else:
+        pil_frames = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in aligned_frames]
+        transformed_frames = torch.stack([lm_model_transforms(frame) for frame in pil_frames])
     fragment_landmarks = run_landmark_model(lm_model_type, lm_model, transformed_frames, lm_extra_data, device)
     raw_lm_data = []
     for filename, landmarks in zip(fragment_filenames, fragment_landmarks):
+        if landmarks is None:
+            raise ValueError(f"No face found on {filename}")
         landmarks = landmarks.cpu().numpy().flatten()
         result = {'filename': filename}
         for i in range(68):
@@ -115,13 +121,14 @@ def process_dataset(
     detect_model_path:str=r'models\yolov6s_face.onnx',
     lm_model_type:str=r'pipnet',
     lm_model_path:str=r'models\pipnet.pth',
+    face_detector_path:str=r'models\shape_predictor_68_face_landmarks.dat',
     meanface_path:str=r'models\meanface.txt',
     aligned_size:tuple[int, int]=(256, 256), 
     device:str='cuda:0',
     fps:int=30
 ):
     detect_session = create_session(detect_model_path)
-    lm_model, lm_extra_data = load_model(lm_model_type, lm_model_path, device, meanface_path)
+    lm_model, lm_extra_data = load_model(lm_model_type, lm_model_path, device, face_detector_path, meanface_path)
     lm_model_transforms = get_transforms(lm_model_type)
     labels_path = find_with_extension(base_path, 'xlsx')
     casme_df = pd.read_excel(labels_path)
@@ -168,6 +175,8 @@ if __name__ == "__main__":
                         help="Landmark model type")
     parser.add_argument("--lm_model", default=r'models\pipnet.pth',
                         help="Path to landmark model")
+    parser.add_argument("--face_detector_path", default=r'models\shape_predictor_68_face_landmarks.dat', 
+                        help="Path to face detector (for starnet)")
     parser.add_argument("--meanface_path", default=r'models\meanface.txt',
                         help="Path to meanface.txt (for pipnet)")
     parser.add_argument("--aligned_size", default="256x256",
@@ -189,6 +198,7 @@ if __name__ == "__main__":
         detect_model_path=args.detection_model,
         lm_model_type=args.lm_model_type,
         lm_model_path=args.lm_model,
+        face_detector_path=args.face_detector_path,
         meanface_path=args.meanface_path,
         aligned_size=aligned_size,
         device=args.device,
