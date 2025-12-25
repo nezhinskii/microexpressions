@@ -132,7 +132,7 @@ def get_landmarks_pipnet(model, batch_images, reverse_index1, reverse_index2, ma
 def get_landmarks_starnet(model, batch_images, detector, sp):
     batch_res = []
     for i, image in enumerate(batch_images):
-        if image is torch.Tensor:
+        if isinstance(image, torch.Tensor):
             np_image = image.cpu().numpy()
         else:
             np_image = image
@@ -163,7 +163,7 @@ def get_landmarks_starnet(model, batch_images, detector, sp):
         norm_landmarks[:, 0] = (landmarks_pv[:, 0] - c_w) / c_w
         norm_landmarks[:, 1] = (landmarks_pv[:, 1] - c_h) / c_h
         batch_res.append(norm_landmarks)
-    return torch.tensor(batch_res)
+    return batch_res
 
 model_points = np.array([
     (0.0, 0.0, 0.0),             # Nose tip (30)
@@ -248,7 +248,9 @@ def get_landmarks(
             if landmarks is None:
                 print(f'No face found on {filename}, skip...')
                 continue
-            landmarks = landmarks.cpu().numpy().flatten()
+            if isinstance(landmarks, torch.Tensor):
+                landmarks = landmarks.cpu().numpy()
+            landmarks = landmarks.flatten()
             result = {'filename': filename}
             for i in range(68):
                 result[f'x{i}'] = landmarks[2 * i]
@@ -265,11 +267,11 @@ def get_landmarks(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Path to input images")
-    parser.add_argument("--input_name", help="Input dataset name")
-    parser.add_argument("--output", required=True, help="Path to save aligned faces (df dir)")
-    parser.add_argument("--model", required=True, help="Path to model")
-    parser.add_argument("--model_type", required=True, choices=["facexformer", "pipnet", "starnet"], help="Model type")
+    parser.add_argument("--input", default=r"data\processed\aligned_celeba_hq", help="Path to input images")
+    parser.add_argument("--input_name", default="celeba_hq", help="Input dataset name")
+    parser.add_argument("--output", default=r"data\landmarks", help="Path to save aligned faces (df dir)")
+    parser.add_argument("--model", default=r"models\300W_STARLoss_NME_2_87.pkl", help="Path to model")
+    parser.add_argument("--model_type", default="starnet", choices=["facexformer", "pipnet", "starnet"], help="Model type")
     parser.add_argument("--meanface_path", default=r'models\meanface.txt', help="Path to meanface.txt (for pipnet)")
     parser.add_argument("--face_detector_path", default=r'models\shape_predictor_68_face_landmarks.dat', help="Path to face detector (for starnet)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")

@@ -1,0 +1,14 @@
+artifact_uri: mlflow-artifacts:/770323318363252747/ab7499440f624efea5b6ba146ac91f47/artifacts
+end_time: 1766687313072
+entry_point_name: ''
+experiment_id: '770323318363252747'
+lifecycle_stage: active
+run_id: ab7499440f624efea5b6ba146ac91f47
+run_name: tasteful-chimp-661
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1766686262726
+status: 3
+tags: []
+user_id: oem
