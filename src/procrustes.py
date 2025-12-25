@@ -10,10 +10,16 @@ def normalize_points(points):
     scale = np.sqrt(np.sum(centered ** 2))
     return centered / scale, centroid, scale
 
-def procrustes_normalization(target_points, normalized_reference):
+def procrustes_normalization(target_points, normalized_reference, pr_slice = None):
     scaled_tar, tar_centroid, tar_scale = normalize_points(target_points)
     
-    R, _ = orthogonal_procrustes(scaled_tar, normalized_reference)
+    if pr_slice is None:
+        scaled_tar_pr = scaled_tar
+        normalized_reference_pr = normalized_reference
+    else:
+        scaled_tar_pr = scaled_tar[pr_slice]
+        normalized_reference_pr = normalized_reference[pr_slice]
+    R, _ = orthogonal_procrustes(scaled_tar_pr, normalized_reference_pr)
     normalized_target = scaled_tar.dot(R)
     return normalized_target, tar_centroid, tar_scale, R
 

@@ -1,6 +1,6 @@
 outs:
-- md5: 843f264e26c76663b1597375204d553a.dir
-  size: 83931122
-  nfiles: 2362
+- md5: cf2ca2e3881f59ee03f1bcbc04a621ac.dir
+  size: 82063721
+  nfiles: 2302
   hash: md5
   path: casme3

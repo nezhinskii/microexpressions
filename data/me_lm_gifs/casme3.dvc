@@ -1,0 +1,6 @@
+outs:
+- md5: 550c00c02d0e9c6e816c9ed9fd077d92.dir
+  size: 268854590
+  nfiles: 767
+  hash: md5
+  path: casme3

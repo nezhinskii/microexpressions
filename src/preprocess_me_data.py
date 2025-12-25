@@ -37,7 +37,7 @@ def proctrustes_fragment_frames(meanface_path, fragment_landmarks):
 
     onset_lm = fragment_landmarks[0]
     target_points_slice = slice(17, 68)
-    _, fixed_centroid, fixed_scale, fixed_R = procrustes_normalization(onset_lm.numpy()[target_points_slice], normalized_meanface[target_points_slice])
+    _, fixed_centroid, fixed_scale, fixed_R = procrustes_normalization(onset_lm.numpy(), normalized_meanface, target_points_slice)
 
     def apply_fixed_procrustes(frame_points, fixed_centroid, fixed_scale, fixed_R):
         centered = frame_points - fixed_centroid
@@ -148,7 +148,6 @@ def process_dataset(
                 lm_model=lm_model, 
                 lm_model_transforms=lm_model_transforms, 
                 lm_extra_data=lm_extra_data, 
-                output_base_path=output_base_path,
                 meanface_path=meanface_path,
                 aligned_size=aligned_size, 
                 device=device, 
@@ -171,7 +170,7 @@ if __name__ == "__main__":
     parser.add_argument("--detection_model", default=r'models\yolov6s_face.onnx',
                         help="Path to detection model (YOLO face)")
     parser.add_argument("--lm_model_type", default='pipnet',
-                        choices=["facexformer", "pipnet"],
+                        choices=["facexformer", "pipnet", "starnet"],
                         help="Landmark model type")
     parser.add_argument("--lm_model", default=r'models\pipnet.pth',
                         help="Path to landmark model")
