@@ -217,7 +217,7 @@ class MicroExpressionModel(nn.Module):
 
         all_landmarks = []
         cum_lengths = torch.cumsum(lengths, dim=0)
-        start_idx = torch.cat([torch.tensor([0]), cum_lengths[:-1]])
+        start_idx = torch.cat([torch.tensor([0], device=device), cum_lengths[:-1]])
         
         for seq in landmarks_seqs:
             all_landmarks.extend(seq)

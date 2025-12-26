@@ -14,6 +14,7 @@ from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from model import FacialGNN, FacialTemporalTransformer, MicroExpressionModel
 from focal_loss import FocalLoss
+
 def set_seed(seed: int = 1):
     random.seed(seed)
     np.random.seed(seed)
@@ -388,9 +389,10 @@ def train(
     model = _build_model(num_classes, transformer_cfg.embed_dim, **model_params).to(device)
 
     # 3. Optimizer & co
-    criterion = torch.nn.CrossEntropyLoss(weight=weights)
+    # criterion = torch.nn.CrossEntropyLoss(weight=weights)
+    criterion = FocalLoss(gamma=1.1, alpha=weights, task_type='multi-class', num_classes=len(weights))
     optimizer = AdamW(model.parameters(), lr=training_cfg.lr, weight_decay=training_cfg.weight_decay)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=7, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=12, verbose=True)
 
     mlflow.set_experiment('ME_model_training')
     with mlflow.start_run() as run:
@@ -422,7 +424,7 @@ def train(
                 "lr": optimizer.param_groups[0]['lr']
             }, step=epoch)
 
-            scheduler.step(val_loss)
+            scheduler.step(-val_f1)
 
             # Save checkpoints
             torch.save(model.state_dict(), last_path)
@@ -433,6 +435,10 @@ def train(
                 torch.save(model.state_dict(), best_path)
                 mlflow.log_artifact(str(best_path), "checkpoints")
                 early_stop_counter = 0
+                best_cm = confusion_matrix(val_labels, val_preds)
+                best_cm_path = save_dir / "best_confusion_matrix.txt"
+                np.savetxt(best_cm_path, best_cm, fmt="%d")
+                mlflow.log_artifact(str(best_cm_path))
                 print(f"*** New best: {val_f1:.4f} ***")
             else:
                 early_stop_counter += 1
