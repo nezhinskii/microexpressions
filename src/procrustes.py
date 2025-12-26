@@ -38,7 +38,8 @@ def normalize_landmarks(input_path, output_path, meanface_path):
     normalized_data = []
     for _, row in df.iterrows():
         points = row[coord_columns].values.astype(np.float32).reshape(68, 2)
-        normalized_points, _, _, _ = procrustes_normalization(points, normalized_meanface)
+        target_points_slice = slice(17, 68)
+        normalized_points, _, _, _ = procrustes_normalization(points, normalized_meanface, target_points_slice)
         normalized_flat = normalized_points.reshape(-1)
         normalized_data.append([row['filename']] + normalized_flat.tolist() + row[other_columns].to_list())
     result_df = pd.DataFrame(normalized_data, columns=['filename'] + norm_coord_columns + other_columns)
@@ -46,9 +47,9 @@ def normalize_landmarks(input_path, output_path, meanface_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Path to input landmarks")
-    parser.add_argument("--output", required=True, help="Path to normalized landmarks")
-    parser.add_argument("--meanface_path", required=True, help="Path to meanface.txt")
+    parser.add_argument("--input", default=r"data\landmarks\lm_celeba_hq_starnet.h5", help="Path to input landmarks")
+    parser.add_argument("--output", default=r"data\landmarks\pr_lm_celeba_hq_starnet.h5", help="Path to normalized landmarks")
+    parser.add_argument("--meanface_path", default=r"models\meanface.txt", help="Path to meanface.txt")
     args = parser.parse_args()
         
     normalize_landmarks(args.input, args.output, args.meanface_path)

@@ -1,0 +1,5 @@
+outs:
+- md5: e1933aed1d8bf025d585ba0bbb198766
+  size: 350229
+  hash: md5
+  path: features_celeba_hq_starnet.h5

@@ -81,8 +81,8 @@ def get_faces_types(input_path, output_path, sigma_threshold, axis_cells):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Path to facial features df")
-    parser.add_argument("--output", required=True, help="Path to facial features df with types of faces")
+    parser.add_argument("--input", default=r"data\landmarks\features_celeba_hq_starnet.h5", help="Path to facial features df")
+    parser.add_argument("--output", default=r"data\landmarks\typed_features_celeba_hq_starnet.h5", help="Path to facial features df with types of faces")
     parser.add_argument("--sigma_threshold", type=np.float64, default=3, help="Sigma threshold for outliers")
     parser.add_argument("--axis_cells", type=int, default=5, help="Num cells by axis")
     args = parser.parse_args()

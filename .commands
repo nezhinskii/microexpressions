@@ -1,17 +1,17 @@
 python .\src\alignment.py --input "data\raw\celeba_hq" --output "data\processed\aligned_celeba_hq" --model "models\yolov8n-face.pt" --device "cuda:0"
 
-python .\src\landmarks.py --input "data\processed\aligned_celeba_hq" --input_name "celeba_hq" --output "data\landmarks" --model "models\pipnet.pth" --model_type "pipnet" --meanface_path "models\meanface.txt" --device "cuda:0"
+python .\src\landmarks.py --input "data\processed\aligned_celeba_hq" --input_name "celeba_hq" --output "data\landmarks" --model "models\300W_STARLoss_NME_2_87.pkl" --model_type "starnet" --meanface_path "models\meanface.txt" --face_detector_path "models\shape_predictor_68_face_landmarks.dat" --device "cuda:0"
 
-python .\src\procrustes.py --input "data\landmarks\lm_celeba_hq_pipnet.h5" --output "data\landmarks\pr_lm_celeba_hq_pipnet.h5" --meanface_path "models\meanface.txt"
+python .\src\procrustes.py --input "data\landmarks\lm_celeba_hq_starnet.h5" --output "data\landmarks\pr_lm_celeba_hq_starnet.h5" --meanface_path "models\meanface.txt"
 
-python .\src\extract_facial_features_and_filter.py --input "data\landmarks\pr_lm_celeba_hq_pipnet.h5" --output "data\landmarks\features_celeba_hq_pipnet.h5" --clustering_dim 2 --yaw_threshold 5 --pitch_threshold 5
+python .\src\extract_facial_features_and_filter.py --input "data\landmarks\pr_lm_celeba_hq_starnet.h5" --output "data\landmarks\features_celeba_hq_starnet.h5" --clustering_dim 2 --yaw_threshold 5 --pitch_threshold 5
 
-python .\src\types_of_faces.py --input "data\landmarks\features_celeba_hq_pipnet.h5" --output "data\landmarks\typed_features_celeba_hq_pipnet.h5"
+python .\src\types_of_faces.py --input "data\landmarks\features_celeba_hq_starnet.h5" --output "data\landmarks\typed_features_celeba_hq_starnet.h5"
 
-python .\src\preprocess_me_data.py --input "data\raw\casme3_partA" --output "data\me_landmarks\casme3" --detection_model "models\yolov6s_face.onnx" --lm_model_type "pipnet" --lm_model "models\pipnet.pth" --meanface_path "models\meanface.txt"
+python .\src\preprocess_me_data.py
 
 python .\src\augment.py 
 
 
 
-python .\src\reduce.py --input "data\landmarks\pr_lm_celeba_hq_pipnet.h5" --output "data\landmarks\umap2_lm_celeba_hq_pipnet.h5" --type umap --out_dim 2 
+python .\src\reduce.py --input "data\landmarks\pr_lm_celeba_hq_starnet.h5" --output "data\landmarks\umap2_pr_lm_celeba_hq_starnet.h5" --type umap --out_dim 2 

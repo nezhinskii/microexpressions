@@ -53,10 +53,10 @@ def reduce_landmarks(input_path, output_path, type, out_dim, random_state):
 
 if __name__ == "__main__": 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Path to input landmarks")
-    parser.add_argument("--output", required=True, help="Path to reduced landmarks")
-    parser.add_argument("--type", required=True, choices=["umap", "parametric_umap"], help="Reducer type")
-    parser.add_argument("--out_dim", default=True, type=int, help="Output dimension")
+    parser.add_argument("--input", default=r"data\landmarks\pr_lm_celeba_hq_starnet.h5", help="Path to input landmarks")
+    parser.add_argument("--output", default=r"data\landmarks\umap2_pr_lm_celeba_hq_starnet.h5", help="Path to reduced landmarks")
+    parser.add_argument("--type", default="umap", choices=["umap", "parametric_umap"], help="Reducer type")
+    parser.add_argument("--out_dim", default=2, type=int, help="Output dimension")
     parser.add_argument("--random_state", default=42, type=int, help="Random state for UMAP")
     args = parser.parse_args()
 

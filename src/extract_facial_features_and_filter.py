@@ -128,12 +128,12 @@ def extract_facial_features_and_filter(input_path, output_path, yaw_threshold = 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Path to input normalized landmarks")
-    parser.add_argument("--output", required=True, help="Path to facial features df")
+    parser.add_argument("--input", default=r"data\landmarks\pr_lm_celeba_hq_starnet.h5", help="Path to input normalized landmarks")
+    parser.add_argument("--output", default=r"data\landmarks\features_celeba_hq_starnet.h5", help="Path to facial features df")
     parser.add_argument("--outliers_dim", type=int, default=15, help="Dimension of the reduced space for outlier search")
     parser.add_argument("--clustering_dim", type=int, default=2, help="Dimension of the reduced space for clustering")
-    parser.add_argument("--yaw_threshold", type=int, default=7, help="Yaw filter threshold")
-    parser.add_argument("--pitch_threshold", type=int, default=7, help="Pitch filter threshold")
+    parser.add_argument("--yaw_threshold", type=int, default=5, help="Yaw filter threshold")
+    parser.add_argument("--pitch_threshold", type=int, default=5, help="Pitch filter threshold")
     parser.add_argument("--lof_enabled", action="store_true", help="Enable LOF filtering")
     parser.add_argument("--lof_threshold", type=np.float64, default=1.1, help="LOF threshold")
     parser.add_argument("--random_state", type=int, default=42, help="Random state")

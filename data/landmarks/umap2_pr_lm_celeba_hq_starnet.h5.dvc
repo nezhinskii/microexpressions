@@ -1,0 +1,5 @@
+outs:
+- md5: bb2851894a82b744afcf067fc26137a8
+  size: 2735640
+  hash: md5
+  path: umap2_pr_lm_celeba_hq_starnet.h5

@@ -1,6 +1,6 @@
 outs:
-- md5: 74730e9e5bf9202cf34543012db47938.dir
-  size: 2336
+- md5: ac00d735ee3b7e58c92de7db53baa894.dir
+  size: 2306
   nfiles: 3
   hash: md5
   path: types_of_faces

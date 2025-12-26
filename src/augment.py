@@ -64,7 +64,8 @@ def augment_fragment(
     augmented_dict = {}
     for cl_id in farthest_clusters:
         target_points = mean_faces[cl_id]
-        interpolator = fit_tps(onset_points, target_points, smoothing)
+        target_points_slice = slice(17, 68)
+        interpolator = fit_tps(onset_points[target_points_slice], target_points[target_points_slice], smoothing)
         augmented_sequence = []
         for frame in procrustes_fragment_lm:
             augmented_frame = apply_tps(interpolator, frame)
@@ -134,8 +135,8 @@ if __name__ == "__main__":
     parser.add_argument("--input", default=r'data\me_landmarks\casme3', help="Base path to ME dataset landmarks")
     parser.add_argument("--output", default=r'data\augmented\casme3', help="Path to save augmented fragments")
     parser.add_argument("--anno_path", default=r'data\me_landmarks\casme3\labels.xlsx', help="Path to ME dataset annotation")
-    parser.add_argument("--typed_faces_path", default=r'data\landmarks\typed_features_celeba_hq_pipnet.h5', help="Path to dataset with types of faces")
-    parser.add_argument("--pr_faces_lm_path", default=r'data\landmarks\pr_lm_celeba_hq_pipnet.h5', help="Path to dataset with faces landmarks")
+    parser.add_argument("--typed_faces_path", default=r'data\landmarks\typed_features_celeba_hq_starnet.h5', help="Path to dataset with types of faces")
+    parser.add_argument("--pr_faces_lm_path", default=r'data\landmarks\pr_lm_celeba_hq_starnet.h5', help="Path to dataset with faces landmarks")
     parser.add_argument("--types_of_faces_model", default=r'models\types_of_faces', help="Path to model for face typization")
     parser.add_argument("--num_augments", default=4, type=int, help="Number of augments for 1 fragment")
     parser.add_argument("--smoothing", default=0.01, type=float, help="smoothing value for TPS transform")
