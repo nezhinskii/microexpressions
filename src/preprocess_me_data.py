@@ -6,6 +6,7 @@ import torch
 import re
 import onnxruntime as ort
 import argparse
+import shutil
 from tqdm import tqdm
 from PIL import Image
 from alignment import align_face, detect_faces, create_session
@@ -13,11 +14,19 @@ from landmarks import run_landmark_model, load_model, get_transforms
 from procrustes import normalize_points, procrustes_normalization
 from extract_facial_features_and_filter import extract_features
 
-def align_fragment_frames(fragment_path, detect_model, output_size, aligned_path, input_name=None, save_aligned=False):
+def get_sorted_fragment_filenames(fragment_path:str):
+    fragment_filenames = os.listdir(fragment_path)
+    def max_number_key(s):
+        nums = re.findall(r'\d+', str(s))
+        return max(map(int, nums), default=float('-inf'))
+    fragment_filenames = sorted(fragment_filenames, key=max_number_key)
+    return fragment_filenames
+
+def align_fragment_frames(fragment_path, fragment_filenames, detect_model, output_size, aligned_path, input_name=None, save_aligned=False):
     aligned_frames = []
     if isinstance(aligned_path, str) and save_aligned:
         os.makedirs(aligned_path, exist_ok=True)
-    for frame_name in os.listdir(fragment_path):
+    for frame_name in fragment_filenames:
         frame_path = os.path.join(fragment_path, frame_name)
         image, detections = detect_faces(frame_path, detect_model, input_name)
         aligned_image = align_face(image, np.array(detections[0]["landmarks"]), detections[0]["bbox"], output_size)
@@ -66,13 +75,13 @@ def process_fragment(
     subject=fragment_data['Subject']; filename=fragment_data['Filename']; onset=fragment_data['Onset']
     fragment_dir = subject + '_' + filename + '_' + str(onset)
     fragment_path = os.path.join(base_path, fragment_dir)
-    fragment_filenames = os.listdir(fragment_path)
+    fragment_filenames = get_sorted_fragment_filenames(fragment_path)
 
     # alignment
     aligned_dir = fragment_dir + '_aligned'
     aligned_path = os.path.join(base_path, aligned_dir)
     input_name = detect_session.get_inputs()[0].name
-    aligned_frames = align_fragment_frames(fragment_path, detect_session, aligned_size, aligned_path, input_name, True)
+    aligned_frames = align_fragment_frames(fragment_path, fragment_filenames, detect_session, aligned_size, aligned_path, input_name, True)
 
     # landmark
     if lm_model_transforms is None:
@@ -116,7 +125,7 @@ def find_with_extension(folder_path, extension):
             return os.path.join(folder_path, file)
 
 def process_dataset(
-    base_path:str=r'data\raw\casme3_partA',
+    base_path:str=r'data\raw\casme3',
     output_base_path:str=r'data\me_landmarks\casme3',
     detect_model_path:str=r'models\yolov6s_face.onnx',
     lm_model_type:str=r'pipnet',
@@ -130,10 +139,17 @@ def process_dataset(
     detect_session = create_session(detect_model_path)
     lm_model, lm_extra_data = load_model(lm_model_type, lm_model_path, device, face_detector_path, meanface_path)
     lm_model_transforms = get_transforms(lm_model_type)
-    labels_path = find_with_extension(base_path, 'xlsx')
+    labels_path = os.path.join(base_path, 'labels.xlsx')
     casme_df = pd.read_excel(labels_path)
+
+    os.makedirs(output_base_path, exist_ok=True)
+    shutil.copy2(labels_path, os.path.join(output_base_path, 'labels.xlsx'))
+    bad_fragments_path = os.path.join(base_path, 'bad_fragments.txt')
+    if os.path.exists(bad_fragments_path):
+        bad_fragments_dest_path = os.path.join(output_base_path, 'bad_fragments.txt')
+        shutil.copy2(bad_fragments_path, bad_fragments_dest_path)
     
-    fragments_path = os.path.join(base_path, 'frame')
+    fragments_path = base_path
     for index, row in tqdm(casme_df.iterrows(), total=len(casme_df)):
         subject=row['Subject']; filename=row['Filename']; onset=row['Onset']; offset=row['Offset']
         if (offset - onset > 2 * fps):
@@ -163,7 +179,7 @@ def process_dataset(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default=r'data\raw\casme3_partA',
+    parser.add_argument("--input", default=r'data\raw\casme3',
                         help="Base path to ME dataset")
     parser.add_argument("--output", default=r'data\me_landmarks\casme3',
                         help="Path to save processed fragments")

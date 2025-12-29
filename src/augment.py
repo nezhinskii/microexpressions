@@ -88,7 +88,11 @@ def augment_dataset(
     anno_dest_path = os.path.join(output_base_path, anno_filename)
     os.makedirs(output_base_path, exist_ok=True)
     shutil.copy2(me_anno_path, anno_dest_path)
-
+    bad_fragments_path = os.path.join(me_lm_base_path, 'bad_fragments.txt')
+    if os.path.exists(bad_fragments_path):
+        bad_fragments_dest_path = os.path.join(output_base_path, 'bad_fragments.txt')
+        shutil.copy2(bad_fragments_path, bad_fragments_dest_path)
+        
     typed_faces_df = pd.read_hdf(typed_faces_path)
     procrustes_lm_df = pd.read_hdf(procrustes_faces_lm_path)
     mean_faces = prepare_mean_faces(typed_faces_df, procrustes_lm_df)

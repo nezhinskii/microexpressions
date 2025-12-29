@@ -15,7 +15,7 @@ class FacialGNN(nn.Module):
         self.fusion_dim = fusion_dim 
         self.use_fusion = fusion_dim is not None
         
-        self.gat1 = GATConv(in_channels=2, out_channels=hidden_dims[0] // 4, heads=4, concat=True, 
+        self.gat1 = GATConv(in_channels=6, out_channels=hidden_dims[0] // 4, heads=4, concat=True, 
                             dropout=dropout, add_self_loops=True)
         self.gat2 = GATConv(in_channels=hidden_dims[0], out_channels=hidden_dims[1] // 4, heads=4, concat=True, 
                             dropout=dropout, add_self_loops=True)
@@ -177,9 +177,25 @@ class MicroExpressionModel(nn.Module):
         self.classifier = nn.Linear(embed_dim, num_classes)
 
     @staticmethod
-    def build_graph(points: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def build_graph(points: torch.Tensor, prev_points: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         selected_points = points[17:68] 
         edge_list = []
+
+        nose_tip_idx = 33
+        nose_tip_global = points[nose_tip_idx]
+        delta_to_nose = selected_points - nose_tip_global
+
+        if prev_points is None:
+            delta_prev = torch.zeros_like(selected_points)
+        else:
+            prev_selected = prev_points[17:68]
+            delta_prev = selected_points - prev_selected
+
+        verticies = torch.cat([
+            selected_points,
+            delta_to_nose,
+            delta_prev
+        ], dim=1)
 
         parts = {
             'left_brow': [17, 18, 19, 20, 21],
@@ -209,7 +225,7 @@ class MicroExpressionModel(nn.Module):
         edge_list_reverse = [(end, start) for start, end in edge_list]
         edge_list.extend(edge_list_reverse)
 
-        return selected_points, (torch.tensor(edge_list, device=points.device).T - 17)
+        return verticies, (torch.tensor(edge_list, device=points.device).T - 17)
     
     def forward(self, landmarks_seqs, lengths):
         device = next(self.parameters()).device
@@ -218,15 +234,17 @@ class MicroExpressionModel(nn.Module):
         all_landmarks = []
         cum_lengths = torch.cumsum(lengths, dim=0)
         start_idx = torch.cat([torch.tensor([0], device=device), cum_lengths[:-1]])
+        start_idx_set = set(start_idx.cpu().numpy().tolist())
         
         for seq in landmarks_seqs:
             all_landmarks.extend(seq)
 
         data_list = []
-        for points in all_landmarks:
+        for i, points in enumerate(all_landmarks):
             points = points.to(device)
-            x, edge_index = MicroExpressionModel.build_graph(points)
-            data = Data(x=x, edge_index=edge_index.to(device))
+            prev_points = None if i in start_idx_set else all_landmarks[i - 1].to(device)
+            verticies, edge_index = MicroExpressionModel.build_graph(points, prev_points)
+            data = Data(x=verticies, edge_index=edge_index.to(device))
             data_list.append(data)
 
         big_batch = Batch.from_data_list(data_list).to(device)

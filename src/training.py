@@ -31,6 +31,11 @@ def prepare_microexpression_datasets(
     set_seed(seed)
     data_root = Path(data_root)
     labels_path = Path(labels_path)
+    exclude_fragments = set()
+    bad_fragments_path = Path(data_root, 'bad_fragments.txt')
+    if bad_fragments_path.exists():
+        with open(bad_fragments_path, "r") as fd:
+            exclude_fragments = {f.strip() for f in fd.readlines()}
 
     df_labels = pd.read_excel(labels_path)
     df_labels['Subject'] = df_labels['Subject'].astype(str).str.strip()
@@ -43,6 +48,7 @@ def prepare_microexpression_datasets(
     )
     
     existing_folders = {p.name for p in data_root.iterdir() if p.is_dir()}
+    existing_folders = existing_folders - exclude_fragments
     valid_rows = df_labels['folder_name'].isin(existing_folders)
     df_valid = df_labels[valid_rows].reset_index(drop=True) 
     fragments = df_valid[['folder_name', 'Subject', target_col]].drop_duplicates()
@@ -390,14 +396,18 @@ def train(
 
     # 3. Optimizer & co
     # criterion = torch.nn.CrossEntropyLoss(weight=weights)
-    criterion = FocalLoss(gamma=1.1, alpha=weights, task_type='multi-class', num_classes=len(weights))
+    criterion = FocalLoss(gamma=2.5, alpha=weights, task_type='multi-class', num_classes=len(weights))
     optimizer = AdamW(model.parameters(), lr=training_cfg.lr, weight_decay=training_cfg.weight_decay)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=12, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=7, verbose=True)
 
     mlflow.set_experiment('ME_model_training')
     with mlflow.start_run() as run:
         run_id = run.info.run_id
 
+        params_map = {**locals(), **model_params, "num_classes": num_classes,
+                           "train_samples": train_samples, "val_samples": val_samples}
+        if isinstance(criterion, FocalLoss):
+            params_map['focal_loss_gamma'] = criterion.gamma
         mlflow.log_params({**locals(), **model_params, "num_classes": num_classes,
                            "train_samples": train_samples, "val_samples": val_samples})
 
@@ -474,7 +484,7 @@ if __name__ == "__main__":
     # ==================== TrainingConfig ====================
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--weight_decay', type=float, default=1e-2)
+    parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--num_epochs', type=int, default=200)
     parser.add_argument('--patience_early_stop', type=int, default=40)
     parser.add_argument('--grad_clip_max_norm', type=float, default=5.0)
@@ -490,7 +500,7 @@ if __name__ == "__main__":
     parser.add_argument('--transformer_num_layers', type=int, default=4)
     parser.add_argument('--transformer_num_heads', type=int, default=4)
     parser.add_argument('--transformer_ff_dim', type=int, default=None, help="Use negative value (e.g. -1) to set None")
-    parser.add_argument('--transformer_dropout', type=float, default=0.1)
+    parser.add_argument('--transformer_dropout', type=float, default=0.2)
     parser.add_argument('--use_cls_token', action='store_true', default=True)
     parser.add_argument('--no_cls_token', action='store_false', dest='use_cls_token')
 
