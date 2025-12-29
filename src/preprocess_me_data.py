@@ -44,9 +44,12 @@ def proctrustes_fragment_frames(meanface_path, fragment_landmarks):
     meanface = np.array(meanface).reshape(-1, 2)
     normalized_meanface, _, _ = normalize_points(meanface)
 
+    if isinstance(fragment_landmarks, torch.Tensor):
+        fragment_landmarks = fragment_landmarks.cpu().numpy()
+
     onset_lm = fragment_landmarks[0]
     target_points_slice = slice(17, 68)
-    _, fixed_centroid, fixed_scale, fixed_R = procrustes_normalization(onset_lm.numpy(), normalized_meanface, target_points_slice)
+    _, fixed_centroid, fixed_scale, fixed_R = procrustes_normalization(onset_lm, normalized_meanface, target_points_slice)
 
     def apply_fixed_procrustes(frame_points, fixed_centroid, fixed_scale, fixed_R):
         centered = frame_points - fixed_centroid
@@ -55,7 +58,7 @@ def proctrustes_fragment_frames(meanface_path, fragment_landmarks):
         return normalized
     
     procrustes_fragment_lm = [
-        apply_fixed_procrustes(frame_lm.numpy(), fixed_centroid, fixed_scale, fixed_R) 
+        apply_fixed_procrustes(frame_lm, fixed_centroid, fixed_scale, fixed_R) 
         for frame_lm in fragment_landmarks
         ]
     return procrustes_fragment_lm
@@ -94,7 +97,9 @@ def process_fragment(
     for filename, landmarks in zip(fragment_filenames, fragment_landmarks):
         if landmarks is None:
             raise ValueError(f"No face found on {filename}")
-        landmarks = landmarks.cpu().numpy().flatten()
+        if isinstance(landmarks, torch.Tensor):
+            landmarks = landmarks.cpu().numpy()
+        landmarks = landmarks.flatten()
         result = {'filename': filename}
         for i in range(68):
             result[f'x{i}'] = landmarks[2 * i]
@@ -185,10 +190,10 @@ if __name__ == "__main__":
                         help="Path to save processed fragments")
     parser.add_argument("--detection_model", default=r'models\yolov6s_face.onnx',
                         help="Path to detection model (YOLO face)")
-    parser.add_argument("--lm_model_type", default='pipnet',
+    parser.add_argument("--lm_model_type", default='starnet',
                         choices=["facexformer", "pipnet", "starnet"],
                         help="Landmark model type")
-    parser.add_argument("--lm_model", default=r'models\pipnet.pth',
+    parser.add_argument("--lm_model", default=r'models\300W_STARLoss_NME_2_87.pkl',
                         help="Path to landmark model")
     parser.add_argument("--face_detector_path", default=r'models\shape_predictor_68_face_landmarks.dat', 
                         help="Path to face detector (for starnet)")
