@@ -160,7 +160,7 @@ def me_collate_fn(batch):
 
 def _build_dataloaders(
     data_root, labels_path, val_size, subject_independent,
-    include_augmented, seed, target_col, batch_size, drop_others
+    include_augmented, seed, target_col, batch_size, drop_others, remap_classes
 ):
     train_list, val_list, label_map = prepare_microexpression_datasets(
         data_root=data_root,
@@ -173,50 +173,60 @@ def _build_dataloaders(
     )
 
     class_mapping = {
-        'happy':        'Positive',
-        'happiness':    'Positive',
+        'happy':        'positive',
+        'happiness':    'positive',
 
-        'surprise':     'Surprise',
+        'surprise':     'surprise',
 
-        'disgust':      'Negative',
-        'fear':         'Negative',
-        'anger':        'Negative',
-        'sad':          'Negative',
-        'sadness':      'Negative',
-        'contempt':     'Negative',
+        'disgust':      'negative',
+        'fear':         'negative',
+        'anger':        'negative',
+        'sad':          'negative',
+        'sadness':      'negative',
+        'contempt':     'negative',
 
-        'others':       'Others',
-        'repression':   'Others',
-        'tense':        'Others'
+        'others':       'others',
+        'repression':   'others',
+        'tense':        'others'
     }
 
     def remap_sample_list(sample_list):
         remapped = []
         for csv_path, label_str in sample_list:
             label_str = label_str.lower().strip()
-            new_label = class_mapping.get(label_str, 'Others')
+            new_label = class_mapping.get(label_str, 'others')
             remapped.append((csv_path, new_label))
         return remapped
     
-    train_list_remapped = remap_sample_list(train_list)
-    val_list_remapped   = remap_sample_list(val_list)
+    if remap_classes:
+        train_list_remapped = remap_sample_list(train_list)
+        val_list_remapped   = remap_sample_list(val_list)
+    else:
+        train_list_remapped = train_list
+        val_list_remapped   = val_list
+
+    if Path(data_root).parts[-1] == 'casmeii':
+        train_list_remapped = [s for s in train_list_remapped if (s[1] != 'fear') and (s[1] != 'sadness')]
+        val_list_remapped   = [s for s in val_list_remapped   if (s[1] != 'fear') and (s[1] != 'sadness')]
 
     if drop_others:
-        train_list_remapped = [s for s in train_list_remapped if s[1] != 'Others']
-        val_list_remapped   = [s for s in val_list_remapped   if s[1] != 'Others']
-        print("Dropped 'Others' class after remapping.")
+        train_list_remapped = [s for s in train_list_remapped if s[1] != 'others']
+        val_list_remapped   = [s for s in val_list_remapped   if s[1] != 'others']
+        print("Dropped 'others' class after remapping.")
     else:
-        print("Kept 'Others' class after remapping.")
+        print("Kept 'others' class after remapping.")
 
     unique_labels = sorted(set(label for _, label in train_list_remapped + val_list_remapped))
     label_map = {label: idx for idx, label in enumerate(unique_labels)}
     num_classes = len(unique_labels)
 
     train_labels = [label for _, label in train_list_remapped]
-    val_labels   = [label for _, label in val_list_remapped]
+    val_labels = [label for _, label in val_list_remapped]
+    full_labels = [*train_labels, *val_labels] 
     print(f"Classes after remapping: {unique_labels}")
-    print("Train distribution:", {k: train_labels.count(k) / len(train_labels) for k in unique_labels})
-    print("Val distribution:  ", {k: val_labels.count(k)   / len(val_labels)   for k in unique_labels})
+    print("Full distribution:", {k: (full_labels.count(k), full_labels.count(k) / len(full_labels)) for k in unique_labels})
+    print("Train distribution:", {k: (train_labels.count(k), train_labels.count(k) / len(train_labels)) for k in unique_labels})
+    print("Val distribution:  ", {k: (val_labels.count(k), val_labels.count(k)   / len(val_labels))   for k in unique_labels})
 
     train_dataset = MicroExpressionDataset(train_list_remapped, label_map)
     val_dataset = MicroExpressionDataset(val_list_remapped, label_map)
@@ -329,6 +339,7 @@ class DatasetConfig:
     seed: int = 1
     target_col: str = 'Objective class'
     drop_others: bool = True
+    remap_classes: bool = False
 
 @dataclass
 class TrainingConfig:
@@ -374,7 +385,8 @@ def train(
         seed=dataset_cfg.seed,
         target_col=dataset_cfg.target_col,
         batch_size=training_cfg.batch_size,
-        drop_others=dataset_cfg.drop_others
+        drop_others=dataset_cfg.drop_others,
+        remap_classes=dataset_cfg.remap_classes
     )
     weights = weights.to(device)
 
@@ -395,8 +407,8 @@ def train(
     model = _build_model(num_classes, transformer_cfg.embed_dim, **model_params).to(device)
 
     # 3. Optimizer & co
-    # criterion = torch.nn.CrossEntropyLoss(weight=weights)
-    criterion = FocalLoss(gamma=2.5, alpha=weights, task_type='multi-class', num_classes=len(weights))
+    criterion = torch.nn.CrossEntropyLoss(weight=weights)
+    # criterion = FocalLoss(gamma=2.5, alpha=weights, task_type='multi-class', num_classes=len(weights))
     optimizer = AdamW(model.parameters(), lr=training_cfg.lr, weight_decay=training_cfg.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=7, verbose=True)
 
@@ -408,8 +420,7 @@ def train(
                            "train_samples": train_samples, "val_samples": val_samples}
         if isinstance(criterion, FocalLoss):
             params_map['focal_loss_gamma'] = criterion.gamma
-        mlflow.log_params({**locals(), **model_params, "num_classes": num_classes,
-                           "train_samples": train_samples, "val_samples": val_samples})
+        mlflow.log_params(params_map)
 
         save_dir = Path('models/me_model') / run_id
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -480,6 +491,7 @@ if __name__ == "__main__":
     parser.add_argument('--target_col', type=str, default='emotion')
     parser.add_argument('--drop_others', action='store_true', default=True, help="Drop samples with 'others' class after remapping to 3-class scheme")
     parser.add_argument('--no_drop_others', action='store_false', dest='drop_others')
+    parser.add_argument('--remap_classes', action='store_false', default=False, help="Remap classes to positive, negative, surprise")
 
     # ==================== TrainingConfig ====================
     parser.add_argument('--batch_size', type=int, default=8)
@@ -514,7 +526,8 @@ if __name__ == "__main__":
         include_augmented=args.include_augmented,
         seed=args.seed,
         target_col=args.target_col,
-        drop_others=args.drop_others
+        drop_others=args.drop_others,
+        remap_classes=args.remap_classes
     )
 
     training_cfg = TrainingConfig(
