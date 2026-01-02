@@ -7,13 +7,63 @@ import mlflow
 from collections import Counter
 from dataclasses import dataclass, fields, field
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
-from model import FacialGNN, FacialTemporalTransformer, MicroExpressionModel
+from model import FacialGNN, FacialTemporalTransformer, MicroExpressionModel, MILPooling
 from focal_loss import FocalLoss
+import pytorch_warmup as warmup
+
+@dataclass
+class DatasetConfig:
+    data_root: str = 'data/augmented/casme3'
+    labels_path: str = 'data/augmented/casme3/labels.xlsx'
+    val_size: float = 0.2
+    subject_independent: bool = True
+    include_augmented: bool = False
+    seed: int = 1
+    target_col: str = 'Objective class'
+    drop_others: bool = True
+    remap_classes: bool = False
+
+@dataclass
+class TrainingConfig:
+    batch_size: int = 8
+    lr: float = 3e-4
+    weight_decay: float = 1e-2
+    num_epochs: int = 100
+    patience_early_stop: int = 10
+    grad_clip_max_norm: float = 1.0
+    device: str = 'cuda'
+    scheduler: str = 'cosine'
+    scheduler_factor: float = 0.5
+    scheduler_patience: int = 7
+
+@dataclass
+class GNNConfig:
+    hidden_dims: list[int] = field(default_factory=lambda: [32, 64, 128])
+    fusion_dim: int | None = None
+    dropout: float = 0.2
+
+@dataclass
+class TransformerConfig:
+    embed_dim: int = 128
+    num_layers: int = 4
+    num_heads: int = 8
+    ff_dim: int | None = None
+    dropout: float = 0.1
+    use_cls_token: bool = True
+
+@dataclass
+class MILConfig:
+    d_model: int = 512
+    kernel_size: int = 3
+    num_conv_layers: int = 1
+    dropout: float = 0.3
+    temperature: float = 1.0
+    use_residual: bool = False
 
 def set_seed(seed: int = 1):
     random.seed(seed)
@@ -237,45 +287,77 @@ def _build_dataloaders(
     train_labels_str = [sample[1] for sample in train_list_remapped]
     train_labels_int = [label_map[label] for label in train_labels_str]
 
+    val_labels_str = [sample[1] for sample in val_list_remapped]
+    val_labels_int = [label_map[label] for label in val_labels_str]
+
     class_counts = Counter(train_labels_int)
     num_classes = len(label_map)
 
     weights = []
     for i in range(num_classes):
         weights.append(1.0 / class_counts.get(i, 1))
-
     weights = torch.tensor(weights, dtype=torch.float)
     weights = weights / weights.sum() * num_classes
 
-    return train_loader, val_loader, label_map, weights, len(train_dataset), len(val_dataset), class_mapping
+    train_class_counts = Counter(train_labels_int)
+    val_class_counts = Counter(val_labels_int)
 
-def _build_model(num_classes, transformer_embed_dim, **model_params):
-    gnn_hidden_dims = model_params.get("gnn_hidden_dims", [32, 64, 128])
+    return (train_loader, val_loader, label_map, weights,
+            len(train_dataset), len(val_dataset), class_mapping,
+            train_class_counts, val_class_counts)
 
+def _build_model(
+    num_classes: int,
+    gnn_cfg: GNNConfig,
+    temporal_cfg: TransformerConfig | MILConfig,
+    temporal_model: str = 'transformer'
+):
+    # ----- GNN -----
     gnn = FacialGNN(
-        hidden_dims=gnn_hidden_dims,
-        fusion_dim=model_params["gnn_fusion_dim"],
-        dropout=model_params["gnn_dropout"]
+        hidden_dims=gnn_cfg.hidden_dims,
+        fusion_dim=gnn_cfg.fusion_dim,
+        dropout=gnn_cfg.dropout
     )
 
-    transformer = FacialTemporalTransformer(
-        embed_dim=transformer_embed_dim,
-        num_layers=model_params["transformer_num_layers"],
-        num_heads=model_params["transformer_num_heads"],
-        ff_dim=model_params["transformer_ff_dim"],
-        dropout=model_params["transformer_dropout"],
-        use_cls_token=model_params["transformer_use_cls_token"]
-    )
+    # ----- Temporal module -----
+    if temporal_model == 'transformer':
+        assert isinstance(temporal_cfg, TransformerConfig)
+        temporal_module = FacialTemporalTransformer(
+            embed_dim=temporal_cfg.embed_dim,
+            num_layers=temporal_cfg.num_layers,
+            num_heads=temporal_cfg.num_heads,
+            ff_dim=temporal_cfg.ff_dim,
+            dropout=temporal_cfg.dropout,
+            use_cls_token=temporal_cfg.use_cls_token
+        )
+        embed_dim = temporal_cfg.embed_dim
+    elif temporal_model == 'mil':
+        assert isinstance(temporal_cfg, MILConfig)
+        frame_dim = gnn_cfg.fusion_dim if gnn_cfg.fusion_dim is not None else gnn_cfg.hidden_dims[-1]
+
+        temporal_module = MILPooling(
+            frame_dim=frame_dim,
+            d_model=temporal_cfg.d_model,
+            kernel_size=temporal_cfg.kernel_size,
+            num_conv_layers=temporal_cfg.num_conv_layers,
+            dropout=temporal_cfg.dropout,
+            temperature=temporal_cfg.temperature,
+            use_residual=temporal_cfg.use_residual
+        )
+        embed_dim = temporal_cfg.d_model
+    else:
+        raise ValueError(f"Unknown temporal_model: {temporal_model}")
 
     model = MicroExpressionModel(
         gnn=gnn,
-        transformer=transformer,
+        temporal_module=temporal_module,
         num_classes=num_classes,
-        embed_dim=transformer_embed_dim
+        embed_dim=embed_dim,
+        temporal_model=temporal_model
     )
     return model
 
-def _train_epoch(model, loader, optimizer, criterion, device, grad_clip_norm):
+def _train_epoch(model, loader, optimizer, criterion, device, grad_clip_norm, lr_scheduler=None, warmup_scheduler=None):
     model.train()
     total_loss = 0.0
     all_preds, all_labels = [], []
@@ -294,6 +376,10 @@ def _train_epoch(model, loader, optimizer, criterion, device, grad_clip_norm):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
 
         optimizer.step()
+
+        if (lr_scheduler is not None) and (warmup_scheduler is not None):
+            with warmup_scheduler.dampening():
+                lr_scheduler.step()
 
         total_loss += loss.item() * labels.size(0)
         preds = logits.argmax(dim=1).cpu().numpy()
@@ -329,54 +415,20 @@ def _validate_epoch(model, loader, criterion, device):
     f1 = f1_score(all_labels, all_preds, average='macro')
     return avg_loss, acc, f1, all_labels, all_preds
 
-@dataclass
-class DatasetConfig:
-    data_root: str = 'data/augmented/casme3'
-    labels_path: str = 'data/augmented/casme3/labels.xlsx'
-    val_size: float = 0.2
-    subject_independent: bool = True
-    include_augmented: bool = False
-    seed: int = 1
-    target_col: str = 'Objective class'
-    drop_others: bool = True
-    remap_classes: bool = False
-
-@dataclass
-class TrainingConfig:
-    batch_size: int = 8
-    lr: float = 3e-4
-    weight_decay: float = 1e-2
-    num_epochs: int = 100
-    patience_early_stop: int = 10
-    grad_clip_max_norm: float = 1.0
-    device: str = 'cuda'
-
-@dataclass
-class GNNConfig:
-    hidden_dims: list[int] = field(default_factory=lambda: [32, 64, 128])
-    fusion_dim: int | None = None
-    dropout: float = 0.2
-
-@dataclass
-class TransformerConfig:
-    embed_dim: int = 128
-    num_layers: int = 4
-    num_heads: int = 8
-    ff_dim: int | None = None
-    dropout: float = 0.1
-    use_cls_token: bool = True
-
 def train(
     dataset_cfg: DatasetConfig = DatasetConfig(),
     training_cfg: TrainingConfig = TrainingConfig(),
     gnn_cfg: GNNConfig = GNNConfig(),
     transformer_cfg: TransformerConfig = TransformerConfig(),
+    mil_cfg: MILConfig = MILConfig(),
+    temporal_model: str = 'transformer'
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    print(f"Using temporal model: {temporal_model}")
 
-    # 1. Data
-    train_loader, val_loader, label_map, weights, train_samples, val_samples, class_mapping = _build_dataloaders(
+    (train_loader, val_loader, label_map, weights, train_samples, val_samples,
+     class_mapping, train_class_counts, val_class_counts) = _build_dataloaders(
         data_root=dataset_cfg.data_root,
         labels_path=dataset_cfg.labels_path,
         val_size=dataset_cfg.val_size,
@@ -389,38 +441,64 @@ def train(
         remap_classes=dataset_cfg.remap_classes
     )
     weights = weights.to(device)
-
     num_classes = len(label_map)
 
-    # 2. Model
-    model_params = {
-        "gnn_hidden_dims": gnn_cfg.hidden_dims,
-        "gnn_fusion_dim": gnn_cfg.fusion_dim,
-        "gnn_dropout": gnn_cfg.dropout,
-        "transformer_num_layers": transformer_cfg.num_layers,
-        "transformer_num_heads": transformer_cfg.num_heads,
-        "transformer_ff_dim": transformer_cfg.ff_dim,
-        "transformer_dropout": transformer_cfg.dropout,
-        "transformer_use_cls_token": transformer_cfg.use_cls_token,
-    }
-
-    model = _build_model(num_classes, transformer_cfg.embed_dim, **model_params).to(device)
+    temporal_cfg = transformer_cfg if temporal_model == 'transformer' else mil_cfg
+    model = _build_model(
+        num_classes=num_classes,
+        gnn_cfg=gnn_cfg,
+        temporal_cfg=temporal_cfg,
+        temporal_model=temporal_model
+    ).to(device)
 
     # 3. Optimizer & co
     criterion = torch.nn.CrossEntropyLoss(weight=weights)
     # criterion = FocalLoss(gamma=2.5, alpha=weights, task_type='multi-class', num_classes=len(weights))
     optimizer = AdamW(model.parameters(), lr=training_cfg.lr, weight_decay=training_cfg.weight_decay)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=7, verbose=True)
+
+    warmup_scheduler = warmup.UntunedLinearWarmup(optimizer)
+    lr_scheduler = None
+    if training_cfg.scheduler == 'cosine':
+        num_steps = len(train_loader) * training_cfg.num_epochs
+        lr_scheduler = CosineAnnealingLR(optimizer, T_max=num_steps)
+    elif training_cfg.scheduler == 'plateau':
+        lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=training_cfg.scheduler_factor, patience=training_cfg.scheduler_patience, verbose=True)
+        warmup_scheduler = None
+    else:
+        raise ValueError(f"Unknown scheduler: {training_cfg.scheduler}")
 
     mlflow.set_experiment('ME_model_training')
     with mlflow.start_run() as run:
         run_id = run.info.run_id
 
-        params_map = {**locals(), **model_params, "num_classes": num_classes,
-                           "train_samples": train_samples, "val_samples": val_samples}
+        params_to_log = {
+            "temporal_model": temporal_model,
+            "num_classes": num_classes,
+            "train_samples": train_samples,
+            "val_samples": val_samples,
+            "classes": ", ".join(sorted(label_map.keys())),
+            "class_mapping": class_mapping,
+            "loss": "FocalLoss" if isinstance(criterion, FocalLoss) else "CrossEntropyLoss",
+        }
         if isinstance(criterion, FocalLoss):
-            params_map['focal_loss_gamma'] = criterion.gamma
-        mlflow.log_params(params_map)
+            params_to_log["focal_loss_gamma"] = criterion.gamma
+
+        params_to_log.update({
+            "dataset_cfg": dataset_cfg,
+            "training_cfg": training_cfg,
+            "gnn_cfg": gnn_cfg,
+        })
+
+        if temporal_model == 'transformer':
+            params_to_log["temporal_cfg"] = transformer_cfg
+        else:
+            params_to_log["temporal_cfg"] = mil_cfg
+
+        for cls_name, idx in label_map.items():
+            params_to_log[f"train_{cls_name}"] = train_class_counts.get(idx, 0)
+            params_to_log[f"val_{cls_name}"]   = val_class_counts.get(idx, 0)
+
+        mlflow.log_params(params_to_log)
 
         save_dir = Path('models/me_model') / run_id
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -432,7 +510,14 @@ def train(
 
         for epoch in range(training_cfg.num_epochs):
             train_loss, train_acc, train_f1 = _train_epoch(
-                model, train_loader, optimizer, criterion, device, training_cfg.grad_clip_max_norm
+                model=model, 
+                loader=train_loader, 
+                optimizer=optimizer, 
+                criterion=criterion, 
+                device=device, 
+                grad_clip_norm=training_cfg.grad_clip_max_norm, 
+                lr_scheduler=lr_scheduler if training_cfg.scheduler == 'cosine' else None, 
+                warmup_scheduler=warmup_scheduler
             )
 
             val_loss, val_acc, val_f1, val_labels, val_preds = _validate_epoch(
@@ -445,7 +530,8 @@ def train(
                 "lr": optimizer.param_groups[0]['lr']
             }, step=epoch)
 
-            scheduler.step(-val_f1)
+            if training_cfg.scheduler == 'plateau':
+                lr_scheduler.step(val_loss)
 
             # Save checkpoints
             torch.save(model.state_dict(), last_path)
@@ -467,9 +553,9 @@ def train(
             print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} "
                   f"| Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f} | Best Val F1: {best_val_f1:.4f}")
 
-            if early_stop_counter >= training_cfg.patience_early_stop:
-                print("Early stopping")
-                break
+            # if early_stop_counter >= training_cfg.patience_early_stop:
+            #     print("Early stopping")
+            #     break
 
         # Confusion matrix
         cm = confusion_matrix(val_labels, val_preds)
@@ -491,30 +577,45 @@ if __name__ == "__main__":
     parser.add_argument('--target_col', type=str, default='emotion')
     parser.add_argument('--drop_others', action='store_true', default=True, help="Drop samples with 'others' class after remapping to 3-class scheme")
     parser.add_argument('--no_drop_others', action='store_false', dest='drop_others')
-    parser.add_argument('--remap_classes', action='store_false', default=False, help="Remap classes to positive, negative, surprise")
+    parser.add_argument('--remap_classes', action='store_true', default=False, help="Remap classes to positive, negative, surprise")
 
     # ==================== TrainingConfig ====================
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--num_epochs', type=int, default=200)
+    parser.add_argument('--num_epochs', type=int, default=100)
     parser.add_argument('--patience_early_stop', type=int, default=40)
     parser.add_argument('--grad_clip_max_norm', type=float, default=5.0)
     parser.add_argument('--device', type=str, choices=['cuda', 'cpu'], default='cuda')
+    parser.add_argument('--scheduler', type=str, choices=['cosine', 'plateau'], default='cosine')
+    parser.add_argument('--scheduler_factor', type=float, default=0.5, help="For plateau scheduler")
+    parser.add_argument('--scheduler_patience', type=int, default=7, help="For plateau scheduler")
 
     # ==================== GNNConfig ====================
-    parser.add_argument('--gnn_hidden_dims', type=int, nargs='+', default=[32, 64, 128], help="Example: --gnn_hidden_dims 32 64 128")
+    parser.add_argument('--gnn_hidden_dims', type=int, nargs='+', default=[64, 128, 256], help="Example: --gnn_hidden_dims 32 64 128")
     parser.add_argument('--gnn_fusion_dim', type=int, default=256, help="Use negative value (e.g. -1) to set None")
-    parser.add_argument('--gnn_dropout', type=float, default=0.2)
+    parser.add_argument('--gnn_dropout', type=float, default=0.3)
+
+    # ==================== Temporal Model Selection ====================
+    parser.add_argument('--temporal_model', type=str, choices=['transformer', 'mil'], default='transformer', help="Choose temporal model: transformer or mil")
 
     # ==================== TransformerConfig ====================
     parser.add_argument('--transformer_embed_dim', type=int, default=256)
-    parser.add_argument('--transformer_num_layers', type=int, default=4)
-    parser.add_argument('--transformer_num_heads', type=int, default=4)
+    parser.add_argument('--transformer_num_layers', type=int, default=6)
+    parser.add_argument('--transformer_num_heads', type=int, default=8)
     parser.add_argument('--transformer_ff_dim', type=int, default=None, help="Use negative value (e.g. -1) to set None")
     parser.add_argument('--transformer_dropout', type=float, default=0.2)
     parser.add_argument('--use_cls_token', action='store_true', default=True)
     parser.add_argument('--no_cls_token', action='store_false', dest='use_cls_token')
+
+    # ==================== MILConfig ====================
+    parser.add_argument('--mil_d_model', type=int, default=512)
+    parser.add_argument('--mil_kernel_size', type=int, default=3)
+    parser.add_argument('--mil_num_conv_layers', type=int, default=1)
+    parser.add_argument('--mil_dropout', type=float, default=0.3)
+    parser.add_argument('--mil_temperature', type=float, default=1.0)
+    parser.add_argument('--mil_use_residual', action='store_true', default=False)
+    parser.add_argument('--no_mil_use_residual', action='store_false', dest='mil_use_residual')
 
     args = parser.parse_args()
     
@@ -538,6 +639,9 @@ if __name__ == "__main__":
         patience_early_stop=args.patience_early_stop,
         grad_clip_max_norm=args.grad_clip_max_norm,
         device=args.device,
+        scheduler=args.scheduler,
+        scheduler_factor=args.scheduler_factor,
+        scheduler_patience=args.scheduler_patience,
     )
 
     gnn_fusion_dim = args.gnn_fusion_dim
@@ -561,4 +665,13 @@ if __name__ == "__main__":
         use_cls_token=args.use_cls_token,
     )
 
-    train(dataset_cfg, training_cfg, gnn_cfg, transformer_cfg)
+    mil_cfg = MILConfig(
+        d_model=args.mil_d_model,
+        kernel_size=args.mil_kernel_size,
+        num_conv_layers=args.mil_num_conv_layers,
+        dropout=args.mil_dropout,
+        temperature=args.mil_temperature,
+        use_residual=args.mil_use_residual,
+    )
+
+    train(dataset_cfg, training_cfg, gnn_cfg, transformer_cfg, mil_cfg, args.temporal_model)

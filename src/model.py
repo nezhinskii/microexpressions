@@ -75,7 +75,65 @@ class FacialGNN(nn.Module):
             return fused
         else:
             return global_mean_pool(x3, batch)
+
+class MILPooling(nn.Module):
+    def __init__(
+        self,
+        frame_dim: int = 256,
+        d_model: int = 512,
+        kernel_size: int = 3,
+        num_conv_layers: int = 1,
+        dropout: float = 0.3,
+        temperature: float = 1.0,
+        use_residual: bool = False,
+    ):
+        super().__init__()
         
+        self.proj = nn.Linear(frame_dim, d_model)
+        self.dropout = nn.Dropout(dropout)
+        
+        conv_layers = []
+        for _ in range(num_conv_layers):
+            conv_layers.append(
+                nn.Conv1d(d_model, d_model, kernel_size=kernel_size, padding=kernel_size//2)
+            )
+        self.conv_stack = nn.Sequential(*conv_layers) if num_conv_layers > 0 else nn.Identity()
+        
+        self.norm = nn.LayerNorm(d_model)
+        self.use_residual = use_residual and num_conv_layers > 0
+        
+        self.frame_scorer = nn.Linear(d_model, 1)
+        self.temperature = temperature
+
+    def forward(self, x, padding_mask=None):
+        """
+        x: [batch_size, seq_len, embed_dim]
+        """
+        x = self.proj(x)
+        
+        residual = x if self.use_residual else None
+        x = x.transpose(1, 2)
+        x = self.conv_stack(x)
+        x = x.transpose(1, 2)
+        
+        if self.use_residual:
+            x = x + residual
+            
+        x = self.norm(x)
+        
+        # Attention
+        scores = self.frame_scorer(x).squeeze(-1)
+        scores = scores.masked_fill(padding_mask, float('-inf'))
+        attn_weights = torch.softmax(scores / self.temperature, dim=1)
+        attn_weights = attn_weights.masked_fill(padding_mask, 0.0)
+        attn_weights = attn_weights / (attn_weights.sum(dim=1, keepdim=True) + 1e-8)
+        
+        video_emb = torch.sum(x * attn_weights.unsqueeze(-1), dim=1)
+        video_emb = self.dropout(video_emb)
+        
+        confidence = attn_weights.max(dim=1).values
+        
+        return video_emb
 
 class PositionalEncoding(nn.Module):
     def __init__(self, embed_dim: int, max_len: int = 500, dropout: float = 0.1):
@@ -166,14 +224,16 @@ class MicroExpressionModel(nn.Module):
     def __init__(
         self,
         gnn: nn.Module,
-        transformer: nn.Module,
+        temporal_module: nn.Module,
         num_classes: int,
-        embed_dim: int = 128
+        embed_dim: int = 128,
+        temporal_model: str = 'transformer'
     ):
         super().__init__()
         self.gnn = gnn
-        self.transformer = transformer
+        self.temporal_module = temporal_module
         self.padder = SequencePadder()
+        self.temporal_model = temporal_model
         self.classifier = nn.Linear(embed_dim, num_classes)
 
     @staticmethod
@@ -260,11 +320,15 @@ class MicroExpressionModel(nn.Module):
 
         padded_seqs, padding_mask = self.padder(seq_embeds, lengths.to(device))
 
-        if self.transformer.use_cls_token:
-            cls_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=padding_mask.device)
-            padding_mask = torch.cat([cls_mask, padding_mask], dim=1)
-
-        representation = self.transformer(padded_seqs, padding_mask=padding_mask)
+        if self.temporal_model == 'transformer':
+            if self.temporal_module.use_cls_token:
+                cls_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=padding_mask.device)
+                padding_mask = torch.cat([cls_mask, padding_mask], dim=1)
+            representation = self.temporal_module(padded_seqs, padding_mask=padding_mask)
+        elif self.temporal_model == 'mil':
+            representation = self.temporal_module(padded_seqs, padding_mask=padding_mask)
+        else:
+            raise ValueError(f"Unknown temporal_model: {self.temporal_model}")
 
         logits = self.classifier(representation)
 
