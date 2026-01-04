@@ -391,29 +391,53 @@ def _train_epoch(model, loader, optimizer, criterion, device, grad_clip_norm, lr
     f1 = f1_score(all_labels, all_preds, average='macro')
     return avg_loss, acc, f1
 
-def _validate_epoch(model, loader, criterion, device):
+def _validate_epoch(model, loader, criterion, device, return_extras=False):
     model.eval()
-    total_loss = 0.0
-    all_preds, all_labels = [], []
+    val_loss = 0.0
+    val_labels = []
+    val_preds = []
+    
+    val_scores = [] if return_extras else None
+    val_attn_weights = [] if return_extras else None
+    val_lengths = [] if return_extras else None
 
     with torch.no_grad():
-        for lm_list, labels, num_frames in loader:
-            landmarks_seqs = [[frame.to(device) for frame in seq] for seq in lm_list]
+        for landmarks_seqs, labels, lengths in loader:
+            landmarks_seqs = [seq.to(device) for seq in landmarks_seqs]
             labels = labels.to(device)
-            num_frames = num_frames.to(device)
+            lengths = lengths.to(device)
 
-            logits = model(landmarks_seqs, num_frames)
+            outputs = model(landmarks_seqs, lengths, return_extras=return_extras)
+            
+            if return_extras:
+                logits, scores, attn_weights = outputs
+            else:
+                logits = outputs
+
             loss = criterion(logits, labels)
+            val_loss += loss.item()
 
-            total_loss += loss.item() * labels.size(0)
-            preds = logits.argmax(dim=1).cpu().numpy()
-            all_preds.extend(preds)
-            all_labels.extend(labels.cpu().numpy())
+            preds = torch.argmax(logits, dim=1)
+            val_labels.extend(labels.cpu().numpy())
+            val_preds.extend(preds.cpu().numpy())
 
-    avg_loss = total_loss / len(loader.dataset)
-    acc = accuracy_score(all_labels, all_preds)
-    f1 = f1_score(all_labels, all_preds, average='macro')
-    return avg_loss, acc, f1, all_labels, all_preds
+            if return_extras:
+                val_scores.append(scores.detach().cpu())
+                val_attn_weights.append(attn_weights.detach().cpu())
+                val_lengths.append(lengths.cpu())
+
+    val_loss /= len(loader)
+    val_acc = accuracy_score(val_labels, val_preds)
+    val_f1 = f1_score(val_labels, val_preds, average='macro')
+
+    if return_extras:
+        val_scores = torch.cat(val_scores, dim=0).numpy()
+        val_attn_weights = torch.cat(val_attn_weights, dim=0).numpy()
+        val_lengths = torch.cat(val_lengths, dim=0).numpy()
+        return val_loss, val_acc, val_f1, np.array(val_labels), np.array(val_preds), \
+               val_scores, val_attn_weights, val_lengths
+    else:
+        return val_loss, val_acc, val_f1, np.array(val_labels), np.array(val_preds)
 
 def train(
     dataset_cfg: DatasetConfig = DatasetConfig(),
@@ -421,7 +445,8 @@ def train(
     gnn_cfg: GNNConfig = GNNConfig(),
     transformer_cfg: TransformerConfig = TransformerConfig(),
     mil_cfg: MILConfig = MILConfig(),
-    temporal_model: str = 'transformer'
+    temporal_model: str = 'transformer',
+    debug: bool = False
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -520,9 +545,15 @@ def train(
                 warmup_scheduler=warmup_scheduler
             )
 
-            val_loss, val_acc, val_f1, val_labels, val_preds = _validate_epoch(
-                model, val_loader, criterion, device
+            val_outputs = _validate_epoch(
+                model, val_loader, criterion, device, return_extras=debug
             )
+
+            if debug:
+                val_loss, val_acc, val_f1, val_labels, val_preds, \
+                val_scores, val_attn, val_lengths = val_outputs
+            else:
+                val_loss, val_acc, val_f1, val_labels, val_preds = val_outputs
 
             mlflow.log_metrics({
                 "train_loss": train_loss, "train_acc": train_acc, "train_f1": train_f1,
@@ -549,6 +580,20 @@ def train(
                 print(f"*** New best: {val_f1:.4f} ***")
             else:
                 early_stop_counter += 1
+
+            if ((val_f1 > best_val_f1) or (epoch == training_cfg.num_epochs - 1)) and debug:
+                prefix = f"epoch_{epoch}"
+                np.save(save_dir / f"{prefix}_val_scores.npy", val_scores)
+                np.save(save_dir / f"{prefix}_val_attn_weights.npy", val_attn)
+                np.save(save_dir / f"{prefix}_val_lengths.npy", val_lengths)
+                np.save(save_dir / f"{prefix}_val_labels.npy", val_labels)
+                np.save(save_dir / f"{prefix}_val_preds.npy", val_preds)
+
+                mlflow.log_artifact(str(save_dir / f"{prefix}_val_scores.npy"))
+                mlflow.log_artifact(str(save_dir / f"{prefix}_val_attn_weights.npy"))
+                mlflow.log_artifact(str(save_dir / f"{prefix}_val_lengths.npy"))
+                mlflow.log_artifact(str(save_dir / f"{prefix}_val_labels.npy"))
+                mlflow.log_artifact(str(save_dir / f"{prefix}_val_preds.npy"))
 
             print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} "
                   f"| Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f} | Best Val F1: {best_val_f1:.4f}")
@@ -590,6 +635,9 @@ if __name__ == "__main__":
     parser.add_argument('--scheduler', type=str, choices=['cosine', 'plateau'], default='cosine')
     parser.add_argument('--scheduler_factor', type=float, default=0.5, help="For plateau scheduler")
     parser.add_argument('--scheduler_patience', type=int, default=7, help="For plateau scheduler")
+
+    # ==================== Debug options ====================
+    parser.add_argument('--debug', action='store_true', default=False, help="If set, collect and log MIL attention scores/weights on validation")
 
     # ==================== GNNConfig ====================
     parser.add_argument('--gnn_hidden_dims', type=int, nargs='+', default=[64, 128, 256], help="Example: --gnn_hidden_dims 32 64 128")
@@ -674,4 +722,4 @@ if __name__ == "__main__":
         use_residual=args.mil_use_residual,
     )
 
-    train(dataset_cfg, training_cfg, gnn_cfg, transformer_cfg, mil_cfg, args.temporal_model)
+    train(dataset_cfg, training_cfg, gnn_cfg, transformer_cfg, mil_cfg, args.temporal_model, args.debug)

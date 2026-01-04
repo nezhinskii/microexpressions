@@ -105,7 +105,7 @@ class MILPooling(nn.Module):
         self.frame_scorer = nn.Linear(d_model, 1)
         self.temperature = temperature
 
-    def forward(self, x, padding_mask=None):
+    def forward(self, x, padding_mask=None, return_extras=False):
         """
         x: [batch_size, seq_len, embed_dim]
         """
@@ -131,9 +131,10 @@ class MILPooling(nn.Module):
         video_emb = torch.sum(x * attn_weights.unsqueeze(-1), dim=1)
         video_emb = self.dropout(video_emb)
         
-        confidence = attn_weights.max(dim=1).values
-        
-        return video_emb
+        if return_extras:
+            return video_emb, scores, attn_weights
+        else:
+            return video_emb
 
 class PositionalEncoding(nn.Module):
     def __init__(self, embed_dim: int, max_len: int = 500, dropout: float = 0.1):
@@ -287,7 +288,7 @@ class MicroExpressionModel(nn.Module):
 
         return verticies, (torch.tensor(edge_list, device=points.device).T - 17)
     
-    def forward(self, landmarks_seqs, lengths):
+    def forward(self, landmarks_seqs, lengths, return_extras=False):
         device = next(self.parameters()).device
         batch_size = len(landmarks_seqs)
 
@@ -325,12 +326,23 @@ class MicroExpressionModel(nn.Module):
                 cls_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=padding_mask.device)
                 padding_mask = torch.cat([cls_mask, padding_mask], dim=1)
             representation = self.temporal_module(padded_seqs, padding_mask=padding_mask)
+            logits = self.classifier(representation)
+            return logits
+        
         elif self.temporal_model == 'mil':
-            representation = self.temporal_module(padded_seqs, padding_mask=padding_mask)
+            temporal_out = self.temporal_module(padded_seqs, padding_mask=padding_mask, return_extras=return_extras)
+            if return_extras:
+                representation, scores, attn_weights = temporal_out
+            else:
+                representation = temporal_out
+            logits = self.classifier(representation)
+            
+            if return_extras:
+                return logits, scores, attn_weights
+            else:
+                return logits
         else:
             raise ValueError(f"Unknown temporal_model: {self.temporal_model}")
 
-        logits = self.classifier(representation)
-
-        return logits
+        
     
