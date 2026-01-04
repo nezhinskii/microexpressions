@@ -400,10 +400,11 @@ def _validate_epoch(model, loader, criterion, device, return_extras=False):
     val_scores = [] if return_extras else None
     val_attn_weights = [] if return_extras else None
     val_lengths = [] if return_extras else None
+    global_max_len = 0
 
     with torch.no_grad():
-        for landmarks_seqs, labels, lengths in loader:
-            landmarks_seqs = [seq.to(device) for seq in landmarks_seqs]
+        for lm_list, labels, lengths in loader:
+            landmarks_seqs = [[frame.to(device) for frame in seq] for seq in lm_list]
             labels = labels.to(device)
             lengths = lengths.to(device)
 
@@ -422,6 +423,8 @@ def _validate_epoch(model, loader, criterion, device, return_extras=False):
             val_preds.extend(preds.cpu().numpy())
 
             if return_extras:
+                batch_max_len = lengths.max().item()
+                global_max_len = max(global_max_len, batch_max_len)
                 val_scores.append(scores.detach().cpu())
                 val_attn_weights.append(attn_weights.detach().cpu())
                 val_lengths.append(lengths.cpu())
@@ -431,9 +434,25 @@ def _validate_epoch(model, loader, criterion, device, return_extras=False):
     val_f1 = f1_score(val_labels, val_preds, average='macro')
 
     if return_extras:
-        val_scores = torch.cat(val_scores, dim=0).numpy()
-        val_attn_weights = torch.cat(val_attn_weights, dim=0).numpy()
-        val_lengths = torch.cat(val_lengths, dim=0).numpy()
+        padded_scores = []
+        padded_attn = []
+        for scores, attn, lengths_batch in zip(val_scores, val_attn_weights, val_lengths):
+            batch_size, current_len = scores.shape
+            if current_len < global_max_len:
+                pad_width = global_max_len - current_len
+                scores_padded = torch.nn.functional.pad(scores, (0, pad_width), value=float('-inf'))
+                attn_padded = torch.nn.functional.pad(attn, (0, pad_width), value=0.0)
+            else:
+                scores_padded = scores
+                attn_padded = attn
+            
+            padded_scores.append(scores_padded)
+            padded_attn.append(attn_padded)
+
+        val_scores = torch.cat(padded_scores, dim=0).numpy()           # [N_val, global_max_len]
+        val_attn_weights = torch.cat(padded_attn, dim=0).numpy()       # [N_val, global_max_len]
+        val_lengths = torch.cat(val_lengths, dim=0).numpy()            # [N_val]
+
         return val_loss, val_acc, val_f1, np.array(val_labels), np.array(val_preds), \
                val_scores, val_attn_weights, val_lengths
     else:
@@ -581,7 +600,7 @@ def train(
             else:
                 early_stop_counter += 1
 
-            if ((val_f1 > best_val_f1) or (epoch == training_cfg.num_epochs - 1)) and debug:
+            if (epoch % 5 == 0) and debug:
                 prefix = f"epoch_{epoch}"
                 np.save(save_dir / f"{prefix}_val_scores.npy", val_scores)
                 np.save(save_dir / f"{prefix}_val_attn_weights.npy", val_attn)
