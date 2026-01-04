@@ -189,23 +189,25 @@ class MicroExpressionDataset(Dataset):
             points = torch.tensor(points, dtype=torch.float)
             landmarks_list.append(points)
 
-        return landmarks_list, label, num_frames
+        return landmarks_list, label, num_frames, csv_path
     
 
 def me_collate_fn(batch):
     landmarks_seqs = []
     labels = []
     lengths = []
+    csv_paths = []
 
-    for landmarks_list, label, num_frames in batch:
+    for landmarks_list, label, num_frames, batch_csv_paths in batch:
         landmarks_seqs.append(landmarks_list)
         labels.append(label)
         lengths.append(num_frames)
+        csv_paths.append(batch_csv_paths)
 
     labels = torch.tensor(labels, dtype=torch.long)
     lengths = torch.tensor(lengths, dtype=torch.long)
 
-    return landmarks_seqs, labels, lengths
+    return landmarks_seqs, labels, lengths, csv_paths
 
 
 def _build_dataloaders(
@@ -362,7 +364,7 @@ def _train_epoch(model, loader, optimizer, criterion, device, grad_clip_norm, lr
     total_loss = 0.0
     all_preds, all_labels = [], []
 
-    for lm_list, labels, num_frames in loader:
+    for lm_list, labels, num_frames, _ in loader:
         landmarks_seqs = [[frame.to(device) for frame in seq] for seq in lm_list]
         labels = labels.to(device)
         num_frames = num_frames.to(device)
@@ -400,10 +402,11 @@ def _validate_epoch(model, loader, criterion, device, return_extras=False):
     val_scores = [] if return_extras else None
     val_attn_weights = [] if return_extras else None
     val_lengths = [] if return_extras else None
+    val_csv_paths = [] if return_extras else None
     global_max_len = 0
 
     with torch.no_grad():
-        for lm_list, labels, lengths in loader:
+        for lm_list, labels, lengths, csv_paths in loader:
             landmarks_seqs = [[frame.to(device) for frame in seq] for seq in lm_list]
             labels = labels.to(device)
             lengths = lengths.to(device)
@@ -428,6 +431,7 @@ def _validate_epoch(model, loader, criterion, device, return_extras=False):
                 val_scores.append(scores.detach().cpu())
                 val_attn_weights.append(attn_weights.detach().cpu())
                 val_lengths.append(lengths.cpu())
+                val_csv_paths.append(np.array(csv_paths))
 
     val_loss /= len(loader)
     val_acc = accuracy_score(val_labels, val_preds)
@@ -436,7 +440,7 @@ def _validate_epoch(model, loader, criterion, device, return_extras=False):
     if return_extras:
         padded_scores = []
         padded_attn = []
-        for scores, attn, lengths_batch in zip(val_scores, val_attn_weights, val_lengths):
+        for scores, attn in zip(val_scores, val_attn_weights):
             batch_size, current_len = scores.shape
             if current_len < global_max_len:
                 pad_width = global_max_len - current_len
@@ -452,9 +456,10 @@ def _validate_epoch(model, loader, criterion, device, return_extras=False):
         val_scores = torch.cat(padded_scores, dim=0).numpy()           # [N_val, global_max_len]
         val_attn_weights = torch.cat(padded_attn, dim=0).numpy()       # [N_val, global_max_len]
         val_lengths = torch.cat(val_lengths, dim=0).numpy()            # [N_val]
+        val_csv_paths = np.concatenate(val_csv_paths, axis=0)          # [N_val]
 
         return val_loss, val_acc, val_f1, np.array(val_labels), np.array(val_preds), \
-               val_scores, val_attn_weights, val_lengths
+               val_scores, val_attn_weights, val_lengths, val_csv_paths
     else:
         return val_loss, val_acc, val_f1, np.array(val_labels), np.array(val_preds)
 
@@ -520,7 +525,7 @@ def train(
             "num_classes": num_classes,
             "train_samples": train_samples,
             "val_samples": val_samples,
-            "classes": ", ".join(sorted(label_map.keys())),
+            "classes": label_map,
             "class_mapping": class_mapping,
             "loss": "FocalLoss" if isinstance(criterion, FocalLoss) else "CrossEntropyLoss",
         }
@@ -570,7 +575,7 @@ def train(
 
             if debug:
                 val_loss, val_acc, val_f1, val_labels, val_preds, \
-                val_scores, val_attn, val_lengths = val_outputs
+                val_scores, val_attn, val_lengths, val_csv_paths = val_outputs
             else:
                 val_loss, val_acc, val_f1, val_labels, val_preds = val_outputs
 
@@ -607,6 +612,10 @@ def train(
                 np.save(save_dir / f"{prefix}_val_lengths.npy", val_lengths)
                 np.save(save_dir / f"{prefix}_val_labels.npy", val_labels)
                 np.save(save_dir / f"{prefix}_val_preds.npy", val_preds)
+                val_csv_paths_file = Path(save_dir / f"val_csv_paths.npy")
+                if not val_csv_paths_file.exists():
+                    np.save(val_csv_paths_file, val_csv_paths)
+                    mlflow.log_artifact(str(val_csv_paths_file))
 
                 mlflow.log_artifact(str(save_dir / f"{prefix}_val_scores.npy"))
                 mlflow.log_artifact(str(save_dir / f"{prefix}_val_attn_weights.npy"))
