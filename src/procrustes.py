@@ -47,8 +47,8 @@ def normalize_single_face_with_params(target_points, reference_points, slice_for
     normalized_points = apply_similarity_transform(target_points, scale, R, t)
     return normalized_points, scale, R, t
 
-def normalize_landmarks(input_path, output_path, meanface_path, slice_for_alignment=None, allow_reflection=True, center_meanface_to_zero=True):
-    reference_points = load_meanface(meanface_path, center_to_zero=center_meanface_to_zero)
+def normalize_landmarks(input_path, output_path, meanface_path, slice_for_alignment=None, allow_reflection=True):
+    reference_points = load_meanface(meanface_path)
     
     df = pd.read_hdf(input_path)
     coord_columns = [col for col in df.columns if re.match(r'[xy]\d+', col)]
