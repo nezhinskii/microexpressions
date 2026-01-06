@@ -11,7 +11,7 @@ from tqdm import tqdm
 from PIL import Image
 from alignment import align_face, detect_faces, create_session
 from landmarks import run_landmark_model, load_model, get_transforms
-from procrustes import normalize_points, procrustes_normalization
+from procrustes import load_meanface, compute_similarity_params, apply_similarity_transform
 from extract_facial_features_and_filter import extract_features
 
 def get_sorted_fragment_filenames(fragment_path:str):
@@ -36,32 +36,88 @@ def align_fragment_frames(fragment_path, fragment_filenames, detect_model, outpu
         aligned_frames.append(aligned_image)
     return aligned_frames
 
-def proctrustes_fragment_frames(meanface_path, fragment_landmarks):
-    with open(meanface_path) as f:
-        meanface = f.readlines()[0]
-    meanface = meanface.strip().split()
-    meanface = [float(x) for x in meanface]
-    meanface = np.array(meanface).reshape(-1, 2)
-    normalized_meanface, _, _ = normalize_points(meanface)
-
-    if isinstance(fragment_landmarks, torch.Tensor):
-        fragment_landmarks = fragment_landmarks.cpu().numpy()
-
-    onset_lm = fragment_landmarks[0]
-    target_points_slice = slice(17, 68)
-    _, fixed_centroid, fixed_scale, fixed_R = procrustes_normalization(onset_lm, normalized_meanface, target_points_slice)
-
-    def apply_fixed_procrustes(frame_points, fixed_centroid, fixed_scale, fixed_R):
-        centered = frame_points - fixed_centroid
-        scaled = centered / fixed_scale
-        normalized = scaled.dot(fixed_R)
-        return normalized
+def compute_eye_tilt_angle(points, left_eye_slice=slice(36, 42), right_eye_slice=slice(42, 48)):
+    left_center = np.mean(points[left_eye_slice], axis=0)
+    right_center = np.mean(points[right_eye_slice], axis=0)
     
-    procrustes_fragment_lm = [
-        apply_fixed_procrustes(frame_lm, fixed_centroid, fixed_scale, fixed_R) 
-        for frame_lm in fragment_landmarks
-        ]
-    return procrustes_fragment_lm
+    dx = right_center[0] - left_center[0]
+    dy = right_center[1] - left_center[1]
+    
+    return np.arctan2(dy, dx)
+
+def rotate_fragment_to_horizontal(fragment_landmarks, left_eye_slice=slice(36, 42), right_eye_slice=slice(42, 48)):
+    N = len(fragment_landmarks)
+    
+    tilt_angles = np.zeros(N)
+    for i in range(N):
+        tilt_angles[i] = compute_eye_tilt_angle(
+            fragment_landmarks[i],
+            left_eye_slice,
+            right_eye_slice
+        )
+    
+    mean_sin = np.mean(np.sin(tilt_angles))
+    mean_cos = np.mean(np.cos(tilt_angles))
+    avg_tilt_angle = np.arctan2(mean_sin, mean_cos)
+    
+    cos_a = np.cos(avg_tilt_angle)
+    sin_a = np.sin(avg_tilt_angle)
+    R_horizontal = np.array([[cos_a, -sin_a],
+                             [sin_a,  cos_a]])
+    
+    rotated_fragment = np.zeros_like(fragment_landmarks)
+    for i in range(N):
+        centroid = np.mean(fragment_landmarks[i], axis=0)
+        centered = fragment_landmarks[i] - centroid
+        rotated = centered @ R_horizontal + centroid
+        rotated_fragment[i] = rotated
+    
+    return rotated_fragment
+
+def proctrustes_fragment_frames(meanface_path, fragment_landmarks, slice_for_alignment=None, allow_reflection=True):
+    meanface = load_meanface(meanface_path)
+    rotated_fragment = rotate_fragment_to_horizontal(fragment_landmarks)
+
+    N = len(rotated_fragment)
+
+    scales = np.zeros(N)
+    rotations = np.zeros((N, 2, 2))
+    translations = np.zeros((N, 2))
+    for i in range(N):
+        target_points = rotated_fragment[i]
+        
+        scale, R, t = compute_similarity_params(
+            target_points, meanface,
+            slice_for_alignment=slice_for_alignment,
+            allow_reflection=allow_reflection
+        )
+        
+        scales[i] = scale
+        rotations[i] = R
+        translations[i] = t
+    
+    avg_scale = np.mean(scales)
+
+    thetas = np.arctan2(rotations[:, 1, 0], rotations[:, 0, 0])
+    mean_sin = np.mean(np.sin(thetas))
+    mean_cos = np.mean(np.cos(thetas))
+    avg_theta = np.arctan2(mean_sin, mean_cos)
+    avg_R = np.array([
+        [np.cos(avg_theta), -np.sin(avg_theta)],
+        [np.sin(avg_theta),  np.cos(avg_theta)]
+    ])
+
+    avg_t = np.mean(translations, axis=0)
+
+    normalized_fragment = np.zeros_like(rotated_fragment)
+
+    for i in range(N):
+        original_points = rotated_fragment[i]
+        normalized_fragment[i] = apply_similarity_transform(
+            original_points, avg_scale, avg_R, avg_t
+        )
+
+    return normalized_fragment
 
 def process_fragment(
     base_path:str, 
@@ -72,6 +128,7 @@ def process_fragment(
     lm_model_transforms, 
     lm_extra_data, 
     meanface_path: str,
+    alignment: bool = False,
     aligned_size:tuple[int, int] = (256, 256), 
     device:str = 'cuda:0', 
 ):
@@ -84,7 +141,10 @@ def process_fragment(
     aligned_dir = fragment_dir + '_aligned'
     aligned_path = os.path.join(base_path, aligned_dir)
     input_name = detect_session.get_inputs()[0].name
-    aligned_frames = align_fragment_frames(fragment_path, fragment_filenames, detect_session, aligned_size, aligned_path, input_name, True)
+    if alignment:
+        aligned_frames = align_fragment_frames(fragment_path, fragment_filenames, detect_session, aligned_size, aligned_path, input_name, True)
+    else:
+        aligned_frames = [cv2.cvtColor(cv2.imread(os.path.join(fragment_path, fname)), cv2.COLOR_BGR2RGB) for fname in fragment_filenames]
 
     # landmark
     if lm_model_transforms is None:
@@ -108,7 +168,7 @@ def process_fragment(
     raw_lm_df = pd.DataFrame(raw_lm_data)
 
     # procrustes
-    procrustes_fragment_lm = proctrustes_fragment_frames(meanface_path, fragment_landmarks)
+    procrustes_fragment_lm = proctrustes_fragment_frames(meanface_path, fragment_landmarks, slice_for_alignment = slice(17, 68))
     coord_columns = [column for column in raw_lm_df.columns if re.match(r'[xy]\d+', column)]
     norm_coord_columns = ['n_' + column for column in coord_columns]
     pr_lm_data = []

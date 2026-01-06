@@ -1,48 +1,74 @@
-from scipy.linalg import orthogonal_procrustes
 import pandas as pd
 import numpy as np
-import argparse
 import re
+import argparse
+from scipy.linalg import orthogonal_procrustes
 
-def normalize_points(points):
-    centroid = np.mean(points, axis=0)
-    centered = points - centroid
-    scale = np.sqrt(np.sum(centered ** 2))
-    return centered / scale, centroid, scale
-
-def procrustes_normalization(target_points, normalized_reference, pr_slice = None):
-    scaled_tar, tar_centroid, tar_scale = normalize_points(target_points)
-    
-    if pr_slice is None:
-        scaled_tar_pr = scaled_tar
-        normalized_reference_pr = normalized_reference
-    else:
-        scaled_tar_pr = scaled_tar[pr_slice]
-        normalized_reference_pr = normalized_reference[pr_slice]
-    R, _ = orthogonal_procrustes(scaled_tar_pr, normalized_reference_pr)
-    normalized_target = scaled_tar.dot(R)
-    return normalized_target, tar_centroid, tar_scale, R
-
-def normalize_landmarks(input_path, output_path, meanface_path):
+def load_meanface(meanface_path=r"models\meanface.txt"):
     with open(meanface_path) as f:
-        meanface = f.readlines()[0]
-    meanface = meanface.strip().split()
-    meanface = [float(x) for x in meanface]
-    meanface = np.array(meanface).reshape(-1, 2)
-    normalized_meanface, _, _ = normalize_points(meanface)
+        line = f.readlines()[0]
+    vals = [float(x) for x in line.strip().split()]
+    points = np.array(vals).reshape(-1, 2)
+    points -= np.mean(points, axis=0)
+    return points
+
+def compute_similarity_params(target_points, reference_points, slice_for_alignment=None, allow_reflection=True):
+    target_centroid = np.mean(target_points, axis=0)
+    ref_centroid = np.mean(reference_points, axis=0)
+
+    centered_target = target_points - target_centroid
+    centered_ref = reference_points - ref_centroid
+
+    if slice_for_alignment is not None:
+        centered_target = centered_target[slice_for_alignment]
+        centered_ref = centered_ref[slice_for_alignment]
+
+    R_raw, _ = orthogonal_procrustes(centered_target, centered_ref)
+    R = R_raw.T
+
+    if not allow_reflection and np.linalg.det(R) < 0:
+        R[:, -1] *= -1
+
+    norm_target = np.linalg.norm(centered_target)
+    norm_ref = np.linalg.norm(centered_ref)
+    scale = norm_ref / norm_target if norm_target > 1e-8 else 1.0
+    t = ref_centroid - scale * (target_centroid @ R)
+
+    return scale, R, t
+
+
+def apply_similarity_transform(points, scale, R, t):
+    return scale * (points @ R) + t
+
+def normalize_single_face_with_params(target_points, reference_points, slice_for_alignment=None, allow_reflection=True):
+    scale, R, t = compute_similarity_params(
+        target_points, reference_points, slice_for_alignment, allow_reflection
+    )
+    normalized_points = apply_similarity_transform(target_points, scale, R, t)
+    return normalized_points, scale, R, t
+
+def normalize_landmarks(input_path, output_path, meanface_path, slice_for_alignment=None, allow_reflection=True, center_meanface_to_zero=True):
+    reference_points = load_meanface(meanface_path, center_to_zero=center_meanface_to_zero)
     
     df = pd.read_hdf(input_path)
-    coord_columns = [column for column in df.columns if re.match('[xy]\d+', column)]
-    other_columns = [column for column in df.columns if column not in [*coord_columns, 'filename']]
-    norm_coord_columns = ['n_' + column for column in coord_columns]
-    normalized_data = []
+    coord_columns = [col for col in df.columns if re.match(r'[xy]\d+', col)]
+    other_columns = [col for col in df.columns if col not in coord_columns + ['filename']]
+    norm_coord_columns = ['n_' + col for col in coord_columns]
+    
+    normalized_rows = []
     for _, row in df.iterrows():
-        points = row[coord_columns].values.astype(np.float32).reshape(68, 2)
-        target_points_slice = slice(17, 68)
-        normalized_points, _, _, _ = procrustes_normalization(points, normalized_meanface, target_points_slice)
-        normalized_flat = normalized_points.reshape(-1)
-        normalized_data.append([row['filename']] + normalized_flat.tolist() + row[other_columns].to_list())
-    result_df = pd.DataFrame(normalized_data, columns=['filename'] + norm_coord_columns + other_columns)
+        target_points = row[coord_columns].values.astype(np.float32).reshape(68, 2)
+        
+        normalized_points, _, _, _ = normalize_single_face_with_params(
+            target_points, reference_points, allow_reflection=allow_reflection,
+            slice_for_alignment=slice_for_alignment
+        )
+        
+        flat_normalized = normalized_points.reshape(-1)
+        new_row = [row['filename']] + flat_normalized.tolist() + row[other_columns].tolist()
+        normalized_rows.append(new_row)
+    
+    result_df = pd.DataFrame(normalized_rows, columns=['filename'] + norm_coord_columns + other_columns)
     result_df.to_hdf(output_path, key='landmarks', mode='w', format='table')
 
 if __name__ == "__main__":
