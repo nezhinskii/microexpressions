@@ -15,12 +15,12 @@ class FacialGNN(nn.Module):
         self.fusion_dim = fusion_dim 
         self.use_fusion = fusion_dim is not None
         
-        self.gat1 = GATConv(in_channels=6, out_channels=hidden_dims[0] // 4, heads=4, concat=True, 
-                            dropout=dropout, add_self_loops=True)
+        self.gat1 = GATConv(in_channels=4, out_channels=hidden_dims[0] // 4, heads=4, concat=True, 
+                            dropout=dropout, add_self_loops=True, edge_dim=2)
         self.gat2 = GATConv(in_channels=hidden_dims[0], out_channels=hidden_dims[1] // 4, heads=4, concat=True, 
-                            dropout=dropout, add_self_loops=True)
+                            dropout=dropout, add_self_loops=True, edge_dim=2)
         self.gat3 = GATConv(in_channels=hidden_dims[1], out_channels=hidden_dims[2], heads=1, concat=False, 
-                            dropout=dropout, add_self_loops=True)
+                            dropout=dropout, add_self_loops=True, edge_dim=2)
         
         self.norm1 = LayerNorm(hidden_dims[0])
         self.norm2 = LayerNorm(hidden_dims[1])
@@ -38,8 +38,8 @@ class FacialGNN(nn.Module):
         else:
             self.final_dim = hidden_dims[2]
 
-    def forward(self, x, edge_index, batch):
-        x1 = self.gat1(x, edge_index)
+    def forward(self, x, edge_index, batch, edge_attr=None):
+        x1 = self.gat1(x, edge_index, edge_attr=edge_attr)
         x1 = self.norm1(x1, batch)
         x1 = F.relu(x1)
         x1 = self.dropout(x1)
@@ -48,7 +48,7 @@ class FacialGNN(nn.Module):
             g1 = global_mean_pool(x1, batch)
             proj_g1 = self.proj1(g1)
 
-        x2 = self.gat2(x1, edge_index)
+        x2 = self.gat2(x1, edge_index, edge_attr=edge_attr)
         x2 = self.norm2(x2, batch)
         x2 = F.relu(x2)
         x2 = self.dropout(x2)
@@ -57,7 +57,7 @@ class FacialGNN(nn.Module):
             g2 = global_mean_pool(x2, batch)
             proj_g2 = self.proj2(g2)
 
-        x3 = self.gat3(x2, edge_index)
+        x3 = self.gat3(x2, edge_index, edge_attr=edge_attr)
         x3 = self.norm3(x3, batch)
         x3 = F.relu(x3)
         if self.use_fusion:
@@ -239,25 +239,28 @@ class MicroExpressionModel(nn.Module):
 
     @staticmethod
     def build_graph(points: torch.Tensor, prev_points: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        selected_points = points[17:68] 
-        edge_list = []
-
-        nose_tip_idx = 33
-        nose_tip_global = points[nose_tip_idx]
-        delta_to_nose = selected_points - nose_tip_global
-
+        def compute_anchor(pts: torch.Tensor) -> torch.Tensor:
+            eye_left_inner = pts[39]
+            eye_right_inner = pts[42]
+            eye_center = (eye_left_inner + eye_right_inner) / 2
+            nose_bridge = torch.mean(pts[27:31], dim=0)
+            return (eye_center + nose_bridge) / 2
+        selected_points = points[17:68]
+        anchor = compute_anchor(points)
+        delta_to_anchor = selected_points - anchor
         if prev_points is None:
             delta_prev = torch.zeros_like(selected_points)
         else:
             prev_selected = prev_points[17:68]
-            delta_prev = selected_points - prev_selected
-
+            prev_anchor = compute_anchor(prev_points)
+            prev_delta_to_anchor = prev_selected - prev_anchor
+            delta_prev = delta_to_anchor - prev_delta_to_anchor
+            
         verticies = torch.cat([
-            selected_points,
-            delta_to_nose,
+            delta_to_anchor,
             delta_prev
         ], dim=1)
-
+        
         parts = {
             'left_brow': [17, 18, 19, 20, 21],
             'right_brow': [22, 23, 24, 25, 26],
@@ -268,12 +271,10 @@ class MicroExpressionModel(nn.Module):
             'mouth_outer': [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59],
             'mouth_inner': [60, 61, 62, 63, 64, 65, 66, 67],
         }
-
         edge_list = []
         for part in parts.values():
             for i in range(len(part) - 1):
                 edge_list.append((part[i], part[i + 1]))
-
         edge_list.extend([(36, 41), (42, 47), (48, 59), (60, 67)])
         edge_list.extend([(21, 27), (22, 27), (30, 33)])
         edge_list.extend([(17, 36), (21, 39), (22, 42), (26, 45)])
@@ -282,11 +283,29 @@ class MicroExpressionModel(nn.Module):
         edge_list.extend([(42, 35), (45, 35), (46, 35), (47, 35)])
         edge_list.extend([(48, 31), (49, 31), (53, 35), (54, 35)])
         edge_list.extend([(48, 60), (54, 64)])
-
         edge_list_reverse = [(end, start) for start, end in edge_list]
         edge_list.extend(edge_list_reverse)
+        edge_index = torch.tensor(edge_list, device=points.device).T - 17
+        
+        def compute_normalized_lengths(selected_pts: torch.Tensor, full_pts: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+            iod = torch.norm(full_pts[39] - full_pts[42]) + 1e-8
+            src, dst = edge_index[0], edge_index[1]
+            diffs = selected_pts[src] - selected_pts[dst]
+            lengths = torch.norm(diffs, dim=1)
+            return lengths / iod
 
-        return verticies, (torch.tensor(edge_list, device=points.device).T - 17)
+        norm_lengths = compute_normalized_lengths(selected_points, points, edge_index)
+        
+        if prev_points is not None:
+            prev_selected = prev_points[17:68]
+            prev_norm_lengths = compute_normalized_lengths(prev_selected, prev_points, edge_index)
+            delta_norm_lengths = norm_lengths - prev_norm_lengths
+        else:
+            delta_norm_lengths = torch.zeros_like(norm_lengths)
+
+        edge_attr = torch.stack([norm_lengths, delta_norm_lengths], dim=1)
+        
+        return verticies, edge_index, edge_attr
     
     def forward(self, landmarks_seqs, lengths, return_extras=False):
         device = next(self.parameters()).device
@@ -304,13 +323,13 @@ class MicroExpressionModel(nn.Module):
         for i, points in enumerate(all_landmarks):
             points = points.to(device)
             prev_points = None if i in start_idx_set else all_landmarks[i - 1].to(device)
-            verticies, edge_index = MicroExpressionModel.build_graph(points, prev_points)
-            data = Data(x=verticies, edge_index=edge_index.to(device))
+            verticies, edge_index, edge_attr = MicroExpressionModel.build_graph(points, prev_points)
+            data = Data(x=verticies, edge_index=edge_index.to(device), edge_attr=edge_attr.to(device))
             data_list.append(data)
 
         big_batch = Batch.from_data_list(data_list).to(device)
 
-        frame_embeds = self.gnn(big_batch.x, big_batch.edge_index, big_batch.batch)
+        frame_embeds = self.gnn(big_batch.x, big_batch.edge_index, big_batch.batch, big_batch.edge_attr)
 
         seq_embeds = []
         for i in range(batch_size):
