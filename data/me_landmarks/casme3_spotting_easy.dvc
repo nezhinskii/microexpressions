@@ -1,0 +1,6 @@
+outs:
+- md5: 3093d4caa57bbaae832a25b1e7a3175b.dir
+  size: 240761792
+  nfiles: 4878
+  hash: md5
+  path: casme3_spotting_easy

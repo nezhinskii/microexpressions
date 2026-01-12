@@ -68,6 +68,43 @@ class MILConfig:
 def set_seed(seed: int = 1):
     random.seed(seed)
     np.random.seed(seed)
+    
+def filter_bad_fragments(fragments: pd.DataFrame, data_root:Path):
+    filtered_fragmetns = fragments
+    
+    bad_fragments_path = Path(data_root, 'bad_fragments.txt')
+    if bad_fragments_path.exists():
+        with open(bad_fragments_path, "r") as fo:
+            exclude_fragments = {f.strip() for f in fo.readlines()}
+            filtered_fragmetns = filtered_fragmetns[~filtered_fragmetns['folder_name'].isin(exclude_fragments)]
+    
+    bad_images_path = Path(data_root, 'bad_images.txt')
+    if bad_images_path.exists():
+        with open(bad_images_path, "r") as fo:
+            bad_images = {}
+            for line in fo.readlines():
+                subject, filename, frame = line.split(' ')
+                frame = int(frame.strip())
+                if subject not in bad_images:
+                    bad_images[subject] = {}
+                if filename not in bad_images[subject]:
+                    bad_images[subject][filename] = set()
+                bad_images[subject][filename].add(frame)
+            
+            valid_rows = np.full(len(filtered_fragmetns), True)
+            for idx, row in filtered_fragmetns.iterrows():
+                filneame_bad_frames = bad_images.get(row['Subject'], {}).get(row['Filename'], set())
+                fragment_onset = int(row['Onset'])
+                fragment_offset = int(row['Offset'])
+                for bad_frame in filneame_bad_frames:
+                    if (fragment_onset < bad_frame) and (bad_frame < fragment_offset):
+                        valid_rows[idx] = False
+                        print(row['folder_name'], fragment_offset, bad_frame)
+                        break
+            
+            filtered_fragmetns = filtered_fragmetns[valid_rows]
+    
+    return filtered_fragmetns
 
 def prepare_microexpression_datasets(
     data_root: str = 'data/augmented/casme3',
@@ -81,11 +118,6 @@ def prepare_microexpression_datasets(
     set_seed(seed)
     data_root = Path(data_root)
     labels_path = Path(labels_path)
-    exclude_fragments = set()
-    bad_fragments_path = Path(data_root, 'bad_fragments.txt')
-    if bad_fragments_path.exists():
-        with open(bad_fragments_path, "r") as fd:
-            exclude_fragments = {f.strip() for f in fd.readlines()}
 
     df_labels = pd.read_excel(labels_path)
     df_labels['Subject'] = df_labels['Subject'].astype(str).str.strip()
@@ -96,13 +128,14 @@ def prepare_microexpression_datasets(
         df_labels['Filename'] + '_' + 
         df_labels['Onset']
     )
-    
+
     existing_folders = {p.name for p in data_root.iterdir() if p.is_dir()}
-    existing_folders = existing_folders - exclude_fragments
     valid_rows = df_labels['folder_name'].isin(existing_folders)
     df_valid = df_labels[valid_rows].reset_index(drop=True) 
-    fragments = df_valid[['folder_name', 'Subject', target_col]].drop_duplicates()
+    fragments = df_valid[['folder_name', 'Subject', 'Filename', 'Onset', 'Offset', target_col]].drop_duplicates()
     fragments[target_col] = fragments[target_col].astype(str).str.lower()
+    
+    fragments = filter_bad_fragments(fragments, data_root)
 
     if subject_independent:
         unique_subjects = fragments['Subject'].unique().tolist()

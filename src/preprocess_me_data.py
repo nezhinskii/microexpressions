@@ -119,6 +119,124 @@ def proctrustes_fragment_frames(meanface_path, fragment_landmarks, slice_for_ali
 
     return normalized_fragment
 
+# def get_face_bbox(landmarks: np.ndarray, width: int, height: int, scale_factor: float = 1.2) -> tuple[list[int], int]:
+#     min_x, min_y = np.min(landmarks, axis=0)
+#     max_x, max_y = np.max(landmarks, axis=0)
+#     center_x = (min_x + max_x) // 2
+#     center_y = (min_y + max_y) // 2
+#     base_size = int(max(max_x - min_x, max_y - min_y) * scale_factor)
+#     size = (base_size // 2 * 2)  # Make even
+#     x1 = max(center_x - size // 2, 0)
+#     y1 = max(center_y - size // 2, 0)
+#     size = min(width - x1, size)
+#     size = min(height - y1, size)
+#     x2, y2 = x1 + size, y1 + size
+#     return [int(x1), int(y1), int(x2), int(y2)], size
+
+def merge_landmarks(detected: list[np.ndarray], forward_pred: list[np.ndarray], backward_pred: list[np.ndarray],
+                    prior_variance: np.ndarray, forward_status: np.ndarray = None, backward_status: np.ndarray = None,
+                    q_noise: float = 0.6, min_consistency_error: float = 5.0) -> tuple[np.ndarray, list[bool], np.ndarray]:
+    num_points = detected[0].shape[0]
+    current_detected = detected[1]
+    current_forward = forward_pred[1]
+    prev_forward = forward_pred[0]
+    prev_backward = backward_pred[0]
+
+    backward_diff = prev_backward - prev_forward
+    backward_dist = np.linalg.norm(backward_diff, axis=1, keepdims=True)
+
+    reliable = [True] * num_points
+    for i in range(num_points):
+        if backward_dist[i] > min_consistency_error:  # Bad backward consistency
+            reliable[i] = False
+        if forward_status is not None and forward_status[i][0] == 0:
+            reliable[i] = False
+        if backward_status is not None and backward_status[i][0] == 0:
+            reliable[i] = False
+            
+    detected_diff = detected[1] - detected[0]
+    detected_dist = np.linalg.norm(detected_diff, axis=1, keepdims=True)
+    predicted_diff = forward_pred[1] - forward_pred[0]
+    predicted_dist = np.linalg.norm(predicted_diff, axis=1, keepdims=True)
+    predicted_dist = np.maximum(predicted_dist, 1e-6)
+    measurement_variance = np.maximum(1.0, (detected_dist / predicted_dist) ** 2).reshape(num_points)
+
+    merged = current_detected.copy().astype(float)
+    for i in range(num_points):
+        if reliable[i]:
+            prior_variance[i] += q_noise
+            kalman_gain = prior_variance[i] / (prior_variance[i] + measurement_variance[i])
+            merged[i] = current_forward[i] + kalman_gain * (current_detected[i] - current_forward[i])
+            prior_variance[i] = (1 - kalman_gain) * prior_variance[i]
+
+    return merged, reliable, prior_variance
+
+
+def calibrate_landmarks(frames: list[np.ndarray], normalized_landmarks: list[np.ndarray], lk_params: dict = None) -> list[np.ndarray]:
+    num_frames = len(frames)
+    if num_frames != len(normalized_landmarks):
+        raise ValueError("Frames and landmarks must match in length.")
+    if num_frames == 0:
+        return []
+
+    if lk_params is None:
+        lk_params = dict(winSize=(15, 15), maxLevel=3,
+                         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+
+    # Denormalize landmarks to absolute pixel coords for each frame
+    absolute_landmarks = []
+    for frame, norm_lm in zip(frames, normalized_landmarks):
+        h, w = frame.shape[:2]
+        abs_lm = np.zeros_like(norm_lm)
+        abs_lm[:, 0] = (norm_lm[:, 0] * (w / 2)) + (w / 2)
+        abs_lm[:, 1] = (norm_lm[:, 1] * (h / 2)) + (h / 2)
+        absolute_landmarks.append(abs_lm.astype(float))
+
+    # Initialize tracking
+    tracked_lms = [absolute_landmarks[0].astype(float)]
+    num_points = absolute_landmarks[0].shape[0]
+    prior_variance = np.ones(num_points, dtype=float) * 2.0
+
+    # Pairwise tracking and merging
+    for i in range(num_frames - 1):
+        face_pair = frames[i:i + 2]
+        lm_pair = absolute_landmarks[i:i + 2]
+        start_points = tracked_lms[i].astype(np.float32)
+        target_points = lm_pair[1].astype(np.float32)
+
+        # Forward optical flow
+        forward_points, forward_status, forward_err = cv2.calcOpticalFlowPyrLK(
+            face_pair[0], face_pair[1], start_points, target_points, **lk_params,
+            flags=cv2.OPTFLOW_USE_INITIAL_FLOW
+        )
+
+        # Backward optical flow
+        backward_points, backward_status, backward_err = cv2.calcOpticalFlowPyrLK(
+            face_pair[1], face_pair[0], forward_points, start_points, **lk_params,
+            flags=cv2.OPTFLOW_USE_INITIAL_FLOW
+        )
+
+        # Round to ints for merge
+        forward_pair = [np.rint(tracked_lms[i]).astype(int), np.rint(forward_points).astype(int)]
+        backward_pair = [np.rint(backward_points).astype(int), np.rint(forward_points).astype(int)]
+
+        # Merge
+        merged_lm, reliable_flags, prior_variance = merge_landmarks(
+            lm_pair, forward_pair, backward_pair, prior_variance,
+            forward_status, backward_status
+        )
+        tracked_lms.append(merged_lm)
+
+    calibrated_normalized = []
+    original_sizes = [frame.shape[:2] for frame in frames]
+    for (h, w), abs_lm in zip(original_sizes, tracked_lms):
+        norm_lm = np.zeros_like(abs_lm)
+        norm_lm[:, 0] = (abs_lm[:, 0] / (w / 2.0)) - 1.0
+        norm_lm[:, 1] = (abs_lm[:, 1] / (h / 2.0)) - 1.0
+        calibrated_normalized.append(norm_lm)
+
+    return calibrated_normalized
+
 def process_fragment(
     base_path:str, 
     fragment_data:pd.Series, 
@@ -131,6 +249,7 @@ def process_fragment(
     alignment: bool = False,
     aligned_size:tuple[int, int] = (256, 256), 
     device:str = 'cuda:0', 
+    fps:int = 30,
 ):
     subject=fragment_data['Subject']; filename=fragment_data['Filename']; onset=fragment_data['Onset']
     fragment_dir = subject + '_' + filename + '_' + str(onset)
@@ -142,17 +261,20 @@ def process_fragment(
     aligned_path = os.path.join(base_path, aligned_dir)
     input_name = detect_session.get_inputs()[0].name
     if alignment:
-        aligned_frames = align_fragment_frames(fragment_path, fragment_filenames, detect_session, aligned_size, aligned_path, input_name, True)
+        frames = align_fragment_frames(fragment_path, fragment_filenames, detect_session, aligned_size, aligned_path, input_name, True)
     else:
-        aligned_frames = [cv2.cvtColor(cv2.imread(os.path.join(fragment_path, fname)), cv2.COLOR_BGR2RGB) for fname in fragment_filenames]
+        frames = [cv2.cvtColor(cv2.imread(os.path.join(fragment_path, fname)), cv2.COLOR_BGR2RGB) for fname in fragment_filenames]
 
     # landmark
     if lm_model_transforms is None:
-        transformed_frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in aligned_frames]
+        transformed_frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames]
     else:
-        pil_frames = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in aligned_frames]
+        pil_frames = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in frames]
         transformed_frames = torch.stack([lm_model_transforms(frame) for frame in pil_frames])
     fragment_landmarks = run_landmark_model(lm_model_type, lm_model, transformed_frames, lm_extra_data, device)
+    # Calibration step (FLCM)
+    calibrated_landmarks = calibrate_landmarks(frames, fragment_landmarks)
+    fragment_landmarks = calibrated_landmarks 
     raw_lm_data = []
     for filename, landmarks in zip(fragment_filenames, fragment_landmarks):
         if landmarks is None:
@@ -213,6 +335,10 @@ def process_dataset(
     if os.path.exists(bad_fragments_path):
         bad_fragments_dest_path = os.path.join(output_base_path, 'bad_fragments.txt')
         shutil.copy2(bad_fragments_path, bad_fragments_dest_path)
+    bad_images_path = os.path.join(base_path, 'bad_images.txt')
+    if os.path.exists(bad_images_path):
+        bad_images_dest_path = os.path.join(output_base_path, 'bad_images.txt')
+        shutil.copy2(bad_images_path, bad_images_dest_path)
     
     fragments_path = base_path
     for index, row in tqdm(casme_df.iterrows(), total=len(casme_df)):
@@ -232,6 +358,7 @@ def process_dataset(
                 meanface_path=meanface_path,
                 aligned_size=aligned_size, 
                 device=device, 
+                fps=fps
             )
             output_fragment_path = os.path.join(output_base_path, fragment_dir)
             os.makedirs(output_fragment_path, exist_ok=True)

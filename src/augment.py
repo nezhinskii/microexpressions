@@ -92,6 +92,10 @@ def augment_dataset(
     if os.path.exists(bad_fragments_path):
         bad_fragments_dest_path = os.path.join(output_base_path, 'bad_fragments.txt')
         shutil.copy2(bad_fragments_path, bad_fragments_dest_path)
+    bad_images_path = os.path.join(me_lm_base_path, 'bad_images.txt')
+    if os.path.exists(bad_images_path):
+        bad_images_dest_path = os.path.join(output_base_path, 'bad_images.txt')
+        shutil.copy2(bad_images_path, bad_images_dest_path)
         
     typed_faces_df = pd.read_hdf(typed_faces_path)
     procrustes_lm_df = pd.read_hdf(procrustes_faces_lm_path)
