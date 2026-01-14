@@ -538,11 +538,14 @@ def train(
     # criterion = FocalLoss(gamma=2.5, alpha=weights, task_type='multi-class', num_classes=len(weights))
     optimizer = AdamW(model.parameters(), lr=training_cfg.lr, weight_decay=training_cfg.weight_decay)
 
-    warmup_scheduler = warmup.UntunedLinearWarmup(optimizer)
     lr_scheduler = None
     if training_cfg.scheduler == 'cosine':
         num_steps = len(train_loader) * training_cfg.num_epochs
         lr_scheduler = CosineAnnealingLR(optimizer, T_max=num_steps)
+        warmup_scheduler = warmup_scheduler = warmup.LinearWarmup(
+            optimizer,
+            warmup_period=len(train_loader) * 7
+        )
     elif training_cfg.scheduler == 'plateau':
         lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=training_cfg.scheduler_factor, patience=training_cfg.scheduler_patience, verbose=True)
         warmup_scheduler = None

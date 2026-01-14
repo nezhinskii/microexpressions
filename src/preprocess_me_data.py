@@ -272,7 +272,7 @@ def process_fragment(
         pil_frames = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in frames]
         transformed_frames = torch.stack([lm_model_transforms(frame) for frame in pil_frames])
     fragment_landmarks = run_landmark_model(lm_model_type, lm_model, transformed_frames, lm_extra_data, device)
-    # Calibration step (FLCM)
+    # calibration step (FLCM)
     calibrated_landmarks = calibrate_landmarks(frames, fragment_landmarks)
     fragment_landmarks = calibrated_landmarks 
     raw_lm_data = []
@@ -289,6 +289,26 @@ def process_fragment(
         raw_lm_data.append(result)
     raw_lm_df = pd.DataFrame(raw_lm_data)
 
+
+    # rescale axis wih origin aspect ratio
+    corrected_landmarks = fragment_landmarks
+    if not alignment and frames:
+        h, w = frames[0].shape[:2]
+        ar = w / h
+        if abs(ar - 1.0) > 1e-6:
+            corrected_landmarks = []
+            for lm in calibrated_landmarks:
+                if lm is None:
+                    corrected_landmarks.append(None)
+                    continue
+                if isinstance(lm, torch.Tensor):
+                    lm = lm.cpu().numpy()
+                lm_corr = lm.copy()
+                if ar > 1:
+                    lm_corr[:, 1] *= (1 / ar)
+                else:
+                    lm_corr[:, 0] *= ar
+                corrected_landmarks.append(lm_corr)
     # procrustes
     procrustes_fragment_lm = proctrustes_fragment_frames(meanface_path, fragment_landmarks, slice_for_alignment = slice(17, 68))
     coord_columns = [column for column in raw_lm_df.columns if re.match(r'[xy]\d+', column)]
