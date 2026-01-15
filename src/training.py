@@ -9,7 +9,7 @@ from dataclasses import dataclass, fields, field
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupKFold, StratifiedKFold
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from model import FacialGNN, FacialTemporalTransformer, MicroExpressionModel, MILPooling
@@ -27,6 +27,8 @@ class DatasetConfig:
     target_col: str = 'Objective class'
     drop_others: bool = True
     remap_classes: bool = False
+    k_folds: int = 1
+    current_fold: int = 0
 
 @dataclass
 class TrainingConfig:
@@ -114,6 +116,8 @@ def prepare_microexpression_datasets(
     include_augmented: bool = False,
     seed: int = 1,
     target_col: str = 'Objective class',
+    k_folds: int = 1,
+    current_fold: int = 0
 ):
     set_seed(seed)
     data_root = Path(data_root)
@@ -136,39 +140,59 @@ def prepare_microexpression_datasets(
     fragments[target_col] = fragments[target_col].astype(str).str.lower()
     
     fragments = filter_bad_fragments(fragments, data_root)
+    
+    if k_folds > 1:
+        print(f"Using {k_folds}-fold CV, current fold: {current_fold}")
+        if subject_independent:
+            splitter = GroupKFold(n_splits=k_folds, shuffle=True, random_state=seed)
+            split = splitter.split(fragments, groups=fragments['Subject'])
+        else:
+            splitter = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed)
+            split = splitter.split(fragments, fragments[target_col])
+        
+        for fold_idx, (train_idx, val_idx) in enumerate(split):
+            if fold_idx == current_fold:
+                train_fragments = fragments.iloc[train_idx]
+                val_fragments = fragments.iloc[val_idx]
+                break
 
-    if subject_independent:
-        unique_subjects = fragments['Subject'].unique().tolist()
-        random.shuffle(unique_subjects)
-        total_frags = len(fragments)
-        train_subjects = []
-        val_subjects = []
-        val_full = False
-        for i, subj in enumerate(unique_subjects):
-            if (i % 2 == 0) or val_full:
-                train_subjects.append(subj)
-            else:
-                val_subjects.append(subj)
-                if len(fragments[fragments['Subject'].isin(val_subjects)]) >= val_size * total_frags:
-                    val_full = True
-
-        train_fragments = fragments[fragments['Subject'].isin(train_subjects)]
-        val_fragments = fragments[fragments['Subject'].isin(val_subjects)]
-
-        print(f"  Train subjects: {len(train_subjects)}, Val subjects: {len(val_subjects)}")
-        print(f"  Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
+        print(f"  Fold {current_fold}: Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
         print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
         print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
+    
     else:
-        train_fragments, val_fragments = train_test_split(
-            fragments,
-            test_size=val_size,
-            random_state=seed,
-            stratify=fragments[target_col]
-        )
-        print(f"  Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
-        print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
-        print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
+        if subject_independent:
+            unique_subjects = fragments['Subject'].unique().tolist()
+            random.shuffle(unique_subjects)
+            total_frags = len(fragments)
+            train_subjects = []
+            val_subjects = []
+            val_full = False
+            for i, subj in enumerate(unique_subjects):
+                if (i % 2 == 0) or val_full:
+                    train_subjects.append(subj)
+                else:
+                    val_subjects.append(subj)
+                    if len(fragments[fragments['Subject'].isin(val_subjects)]) >= val_size * total_frags:
+                        val_full = True
+
+            train_fragments = fragments[fragments['Subject'].isin(train_subjects)]
+            val_fragments = fragments[fragments['Subject'].isin(val_subjects)]
+
+            print(f"  Train subjects: {len(train_subjects)}, Val subjects: {len(val_subjects)}")
+            print(f"  Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
+            print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
+            print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
+        else:
+            train_fragments, val_fragments = train_test_split(
+                fragments,
+                test_size=val_size,
+                random_state=seed,
+                stratify=fragments[target_col]
+            )
+            print(f"  Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
+            print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
+            print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
     
     def make_dataset(target_col, fragments_df, include_augmented_in_train=False):
         samples = []
@@ -245,7 +269,8 @@ def me_collate_fn(batch):
 
 def _build_dataloaders(
     data_root, labels_path, val_size, subject_independent,
-    include_augmented, seed, target_col, batch_size, drop_others, remap_classes
+    include_augmented, seed, target_col, batch_size, drop_others, remap_classes,
+    k_folds, current_fold
 ):
     train_list, val_list, label_map = prepare_microexpression_datasets(
         data_root=data_root,
@@ -255,8 +280,10 @@ def _build_dataloaders(
         include_augmented=include_augmented,
         seed=seed,
         target_col=target_col,
+        k_folds=k_folds,
+        current_fold=current_fold
     )
-
+    
     class_mapping = {
         'happy':        'positive',
         'happiness':    'positive',
@@ -503,7 +530,9 @@ def train(
     transformer_cfg: TransformerConfig = TransformerConfig(),
     mil_cfg: MILConfig = MILConfig(),
     temporal_model: str = 'transformer',
-    debug: bool = False
+    debug: bool = False,
+    is_cv_fold: bool = False,
+    fold_idx: int = -1
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -520,7 +549,9 @@ def train(
         target_col=dataset_cfg.target_col,
         batch_size=training_cfg.batch_size,
         drop_others=dataset_cfg.drop_others,
-        remap_classes=dataset_cfg.remap_classes
+        remap_classes=dataset_cfg.remap_classes,
+        k_folds=dataset_cfg.k_folds,
+        current_fold=dataset_cfg.current_fold
     )
     weights = weights.to(device)
     num_classes = len(label_map)
@@ -544,7 +575,7 @@ def train(
         lr_scheduler = CosineAnnealingLR(optimizer, T_max=num_steps)
         warmup_scheduler = warmup_scheduler = warmup.LinearWarmup(
             optimizer,
-            warmup_period=len(train_loader) * 7
+            warmup_period=len(train_loader) * 8
         )
     elif training_cfg.scheduler == 'plateau':
         lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=training_cfg.scheduler_factor, patience=training_cfg.scheduler_patience, verbose=True)
@@ -553,7 +584,8 @@ def train(
         raise ValueError(f"Unknown scheduler: {training_cfg.scheduler}")
 
     mlflow.set_experiment('ME_model_training')
-    with mlflow.start_run() as run:
+    run_name = f"Fold_{fold_idx}" if is_cv_fold else "Single_Run"
+    with mlflow.start_run(run_name=run_name, nested=is_cv_fold) as run:
         run_id = run.info.run_id
 
         params_to_log = {
@@ -568,16 +600,20 @@ def train(
         if isinstance(criterion, FocalLoss):
             params_to_log["focal_loss_gamma"] = criterion.gamma
 
-        params_to_log.update({
-            "dataset_cfg": dataset_cfg,
-            "training_cfg": training_cfg,
-            "gnn_cfg": gnn_cfg,
-        })
-
-        if temporal_model == 'transformer':
-            params_to_log["temporal_cfg"] = transformer_cfg
+        if is_cv_fold:
+            params_to_log["fold"] = fold_idx
+            params_to_log["mode"] = "cv_fold"
         else:
-            params_to_log["temporal_cfg"] = mil_cfg
+            params_to_log.update({
+                "dataset_cfg": dataset_cfg,
+                "training_cfg": training_cfg,
+                "gnn_cfg": gnn_cfg,
+            })
+
+            if temporal_model == 'transformer':
+                params_to_log["temporal_cfg"] = transformer_cfg
+            else:
+                params_to_log["temporal_cfg"] = mil_cfg
 
         for cls_name, idx in label_map.items():
             params_to_log[f"train_{cls_name}"] = train_class_counts.get(idx, 0)
@@ -592,6 +628,13 @@ def train(
 
         best_val_f1 = 0.0
         early_stop_counter = 0
+        
+        best_f1_after_warmup = 0.0
+        best_labels_after_warmup = None
+        best_preds_after_warmup = None
+        last_f1 = 0.0
+        last_labels = None
+        last_preds = None
 
         for epoch in range(training_cfg.num_epochs):
             train_loss, train_acc, train_f1 = _train_epoch(
@@ -615,14 +658,28 @@ def train(
             else:
                 val_loss, val_acc, val_f1, val_labels, val_preds = val_outputs
 
+            prefix = f"fold_{fold_idx}_" if is_cv_fold else ""
             mlflow.log_metrics({
-                "train_loss": train_loss, "train_acc": train_acc, "train_f1": train_f1,
-                "val_loss": val_loss, "val_acc": val_acc, "val_f1": val_f1,
-                "lr": optimizer.param_groups[0]['lr']
+                f"{prefix}train_loss": train_loss,
+                f"{prefix}train_acc": train_acc,
+                f"{prefix}train_f1": train_f1,
+                f"{prefix}val_loss": val_loss,
+                f"{prefix}val_acc": val_acc,
+                f"{prefix}val_f1": val_f1,
+                f"{prefix}lr": optimizer.param_groups[0]['lr']
             }, step=epoch)
 
             if training_cfg.scheduler == 'plateau':
                 lr_scheduler.step(val_loss)
+
+            last_f1 = val_f1
+            last_labels = val_labels.copy()
+            last_preds = val_preds.copy()
+            
+            if (epoch >= (training_cfg.num_epochs // 2)) and (val_f1 > best_f1_after_warmup):
+                best_f1_after_warmup = val_f1
+                best_labels_after_warmup = val_labels.copy()
+                best_preds_after_warmup = val_preds.copy()
 
             # Save checkpoints
             torch.save(model.state_dict(), last_path)
@@ -665,12 +722,23 @@ def train(
             # if early_stop_counter >= training_cfg.patience_early_stop:
             #     print("Early stopping")
             #     break
+            
+        fold_prefix = f"fold_{fold_idx}_" if is_cv_fold else ""
+        mlflow.log_metrics({
+            f"{fold_prefix}best_f1_after_warmup": best_f1_after_warmup,
+            f"{fold_prefix}last_f1": last_f1,
+        })
 
         # Confusion matrix
         cm = confusion_matrix(val_labels, val_preds)
         cm_path = save_dir / "confusion_matrix.txt"
         np.savetxt(cm_path, cm, fmt="%d")
         mlflow.log_artifact(str(cm_path))
+        
+        return (
+            best_f1_after_warmup, best_labels_after_warmup, best_preds_after_warmup,
+            last_f1, last_labels, last_preds
+        )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train MicroExpression model")
@@ -687,6 +755,9 @@ if __name__ == "__main__":
     parser.add_argument('--drop_others', action='store_true', default=True, help="Drop samples with 'others' class after remapping to 3-class scheme")
     parser.add_argument('--no_drop_others', action='store_false', dest='drop_others')
     parser.add_argument('--remap_classes', action='store_true', default=False, help="Remap classes to positive, negative, surprise")
+    parser.add_argument('--k_folds', type=int, default=5, help="Number of folds for cross-validation (1 = single split)")
+    parser.add_argument('--current_fold', type=int, default=None, 
+                        help="If set — train only this fold. If None and k_folds > 1 — train all folds sequentially")
 
     # ==================== TrainingConfig ====================
     parser.add_argument('--batch_size', type=int, default=32)
@@ -740,7 +811,9 @@ if __name__ == "__main__":
         seed=args.seed,
         target_col=args.target_col,
         drop_others=args.drop_others,
-        remap_classes=args.remap_classes
+        remap_classes=args.remap_classes,
+        k_folds=args.k_folds,
+        current_fold=args.current_fold if args.current_fold is not None else 0,
     )
 
     training_cfg = TrainingConfig(
@@ -786,4 +859,88 @@ if __name__ == "__main__":
         use_residual=args.mil_use_residual,
     )
 
-    train(dataset_cfg, training_cfg, gnn_cfg, transformer_cfg, mil_cfg, args.temporal_model, args.debug)
+    if args.k_folds > 1 and args.current_fold is None:
+        print(f"Starting {args.k_folds}-fold cross-validation")
+
+        mlflow.set_experiment('ME_model_training')
+        with mlflow.start_run(run_name="CV_Parent") as parent_run:
+            cv_id = parent_run.info.run_id
+            mlflow.set_tag("cv_id", cv_id)
+            mlflow.set_tag("mode", "cross_validation")
+
+            mlflow.log_params({
+                "k_folds": args.k_folds,
+                "temporal_model": args.temporal_model,
+                "seed": args.seed,
+                "dataset_cfg": dataset_cfg,
+                "training_cfg": training_cfg,
+                "gnn_cfg": gnn_cfg,
+                "temporal_cfg": transformer_cfg if args.temporal_model == 'transformer' else mil_cfg
+            })
+
+            all_best_labels = []
+            all_best_preds = []
+            all_last_labels = []
+            all_last_preds = []
+            fold_best_f1s = []
+            fold_last_f1s = []
+
+            for fold in range(args.k_folds):
+                print(f"\nFold {fold}/{args.k_folds-1}")
+                dataset_cfg.current_fold = fold
+
+                (
+                    fold_best_f1, fold_best_labels, fold_best_preds,
+                    fold_last_f1, fold_last_labels, fold_last_preds
+                ) = train(
+                    dataset_cfg=dataset_cfg,
+                    training_cfg=training_cfg,
+                    gnn_cfg=gnn_cfg,
+                    transformer_cfg=transformer_cfg,
+                    mil_cfg=mil_cfg,
+                    temporal_model=args.temporal_model,
+                    debug=args.debug,
+                    is_cv_fold=True,
+                    fold_idx=fold
+                )
+
+                all_best_labels.extend(fold_best_labels)
+                all_best_preds.extend(fold_best_preds)
+                all_last_labels.extend(fold_last_labels)
+                all_last_preds.extend(fold_last_preds)
+
+                fold_best_f1s.append(fold_best_f1)
+                fold_last_f1s.append(fold_last_f1)
+
+            global_best_f1 = f1_score(all_best_labels, all_best_preds, average='macro')
+            global_best_acc = accuracy_score(all_best_labels, all_best_preds)
+            global_last_f1 = f1_score(all_last_labels, all_last_preds, average='macro')
+            global_last_acc = accuracy_score(all_last_labels, all_last_preds)
+
+            mlflow.log_metrics({
+                "cv_global_best_f1": global_best_f1,
+                "cv_global_best_acc": global_best_acc,
+                "cv_global_last_f1": global_last_f1,
+                "cv_global_last_acc": global_last_acc,
+                "cv_mean_best_f1": np.mean(fold_best_f1s),
+                "cv_std_best_f1": np.std(fold_best_f1s),
+                "cv_mean_last_f1": np.mean(fold_last_f1s),
+                "cv_std_last_f1": np.std(fold_last_f1s),
+            })
+    else:
+        if args.k_folds > 1:
+            print(f"Training only fold {dataset_cfg.current_fold} / {args.k_folds-1}")
+        else:
+            print("Training single split (no cross-validation)")
+        
+        best_f1, val_labels, val_preds = train(
+            dataset_cfg=dataset_cfg,
+            training_cfg=training_cfg,
+            gnn_cfg=gnn_cfg,
+            transformer_cfg=transformer_cfg,
+            mil_cfg=mil_cfg,
+            temporal_model=args.temporal_model,
+            debug=args.debug,
+            is_cv_fold=False,
+            fold_idx=-1
+        )

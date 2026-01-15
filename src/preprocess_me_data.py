@@ -310,7 +310,7 @@ def process_fragment(
                     lm_corr[:, 0] *= ar
                 corrected_landmarks.append(lm_corr)
     # procrustes
-    procrustes_fragment_lm = proctrustes_fragment_frames(meanface_path, fragment_landmarks, slice_for_alignment = slice(17, 68))
+    procrustes_fragment_lm = proctrustes_fragment_frames(meanface_path, corrected_landmarks, slice_for_alignment = slice(17, 68))
     coord_columns = [column for column in raw_lm_df.columns if re.match(r'[xy]\d+', column)]
     norm_coord_columns = ['n_' + column for column in coord_columns]
     pr_lm_data = []
