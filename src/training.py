@@ -2,70 +2,18 @@ import pandas as pd
 import random
 import numpy as np
 import torch
-import argparse
 import mlflow
 from collections import Counter
-from dataclasses import dataclass, fields, field
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, CosineAnnealingWarmRestarts
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from sklearn.model_selection import train_test_split, GroupKFold, StratifiedKFold
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
-from model import FacialGNN, FacialTemporalTransformer, MicroExpressionModel, MILPooling
+from model import FacialGNN, FacialTemporalTransformer, MicroExpressionModel, MILPooling, FacialRNN
 from focal_loss import FocalLoss
 import pytorch_warmup as warmup
-
-@dataclass
-class DatasetConfig:
-    data_root: str = 'data/augmented/casme3'
-    labels_path: str = 'data/augmented/casme3/labels.xlsx'
-    val_size: float = 0.2
-    subject_independent: bool = True
-    include_augmented: bool = False
-    seed: int = 1
-    target_col: str = 'Objective class'
-    drop_others: bool = True
-    remap_classes: bool = False
-    k_folds: int = 1
-    current_fold: int = 0
-
-@dataclass
-class TrainingConfig:
-    batch_size: int = 8
-    lr: float = 3e-4
-    weight_decay: float = 1e-2
-    num_epochs: int = 100
-    patience_early_stop: int = 10
-    grad_clip_max_norm: float = 1.0
-    device: str = 'cuda'
-    scheduler: str = 'cosine'
-    scheduler_factor: float = 0.5
-    scheduler_patience: int = 7
-
-@dataclass
-class GNNConfig:
-    hidden_dims: list[int] = field(default_factory=lambda: [32, 64, 128])
-    fusion_dim: int | None = None
-    dropout: float = 0.2
-
-@dataclass
-class TransformerConfig:
-    embed_dim: int = 128
-    num_layers: int = 4
-    num_heads: int = 8
-    ff_dim: int | None = None
-    dropout: float = 0.1
-    use_cls_token: bool = True
-
-@dataclass
-class MILConfig:
-    d_model: int = 512
-    kernel_size: int = 3
-    num_conv_layers: int = 1
-    dropout: float = 0.3
-    temperature: float = 1.0
-    use_residual: bool = False
+from train_arguments import create_training_parser, create_train_configs, TrainingConfig, DatasetConfig, GNNConfig, TransformerConfig, MILConfig, RNNConfig
 
 def set_seed(seed: int = 1):
     random.seed(seed)
@@ -372,6 +320,7 @@ def _build_model(
     num_classes: int,
     gnn_cfg: GNNConfig,
     temporal_cfg: TransformerConfig | MILConfig,
+    rnn_cfg: RNNConfig,
     temporal_model: str = 'transformer'
 ):
     # ----- GNN -----
@@ -407,6 +356,20 @@ def _build_model(
             use_residual=temporal_cfg.use_residual
         )
         embed_dim = temporal_cfg.d_model
+    elif temporal_model in ['gru', 'lstm']:
+        assert isinstance(rnn_cfg, RNNConfig), "For GRU/LSTM use rnn_cfg"
+        frame_dim = gnn_cfg.fusion_dim if gnn_cfg.fusion_dim is not None else gnn_cfg.hidden_dims[-1]
+        
+        temporal_module = FacialRNN(
+            input_size=frame_dim,
+            hidden_size=rnn_cfg.hidden_size,
+            num_layers=rnn_cfg.num_layers,
+            dropout=rnn_cfg.dropout,
+            bidirectional=rnn_cfg.bidirectional,
+            rnn_type=temporal_model
+        )
+        embed_dim = temporal_module.output_dim
+        
     else:
         raise ValueError(f"Unknown temporal_model: {temporal_model}")
 
@@ -529,6 +492,7 @@ def train(
     gnn_cfg: GNNConfig = GNNConfig(),
     transformer_cfg: TransformerConfig = TransformerConfig(),
     mil_cfg: MILConfig = MILConfig(),
+    rnn_cfg: RNNConfig = RNNConfig(),
     temporal_model: str = 'transformer',
     debug: bool = False,
     is_cv_fold: bool = False,
@@ -561,6 +525,7 @@ def train(
         num_classes=num_classes,
         gnn_cfg=gnn_cfg,
         temporal_cfg=temporal_cfg,
+        rnn_cfg=rnn_cfg,
         temporal_model=temporal_model
     ).to(device)
 
@@ -579,6 +544,15 @@ def train(
         )
     elif training_cfg.scheduler == 'plateau':
         lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=training_cfg.scheduler_factor, patience=training_cfg.scheduler_patience, verbose=True)
+        warmup_scheduler = None
+    elif training_cfg.scheduler == 'cosine-restarts':
+        lr_scheduler = CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=20,
+            T_mult=2,
+            eta_min=1e-5,
+            last_epoch=-1
+        )
         warmup_scheduler = None
     else:
         raise ValueError(f"Unknown scheduler: {training_cfg.scheduler}")
@@ -658,19 +632,20 @@ def train(
             else:
                 val_loss, val_acc, val_f1, val_labels, val_preds = val_outputs
 
-            prefix = f"fold_{fold_idx}_" if is_cv_fold else ""
             mlflow.log_metrics({
-                f"{prefix}train_loss": train_loss,
-                f"{prefix}train_acc": train_acc,
-                f"{prefix}train_f1": train_f1,
-                f"{prefix}val_loss": val_loss,
-                f"{prefix}val_acc": val_acc,
-                f"{prefix}val_f1": val_f1,
-                f"{prefix}lr": optimizer.param_groups[0]['lr']
+                f"train_loss": train_loss,
+                f"train_acc": train_acc,
+                f"train_f1": train_f1,
+                f"val_loss": val_loss,
+                f"val_acc": val_acc,
+                f"val_f1": val_f1,
+                f"lr": optimizer.param_groups[0]['lr']
             }, step=epoch)
 
             if training_cfg.scheduler == 'plateau':
                 lr_scheduler.step(val_loss)
+            if training_cfg.scheduler == 'cosine-restarts':
+                lr_scheduler.step()
 
             last_f1 = val_f1
             last_labels = val_labels.copy()
@@ -723,10 +698,9 @@ def train(
             #     print("Early stopping")
             #     break
             
-        fold_prefix = f"fold_{fold_idx}_" if is_cv_fold else ""
         mlflow.log_metrics({
-            f"{fold_prefix}best_f1_after_warmup": best_f1_after_warmup,
-            f"{fold_prefix}last_f1": last_f1,
+            f"best_f1_after_warmup": best_f1_after_warmup,
+            f"last_f1": last_f1,
         })
 
         # Confusion matrix
@@ -741,123 +715,9 @@ def train(
         )
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train MicroExpression model")
-
-    # ==================== DatasetConfig ====================
-    parser.add_argument('--data_root', type=str, default='data/augmented/casme3')
-    parser.add_argument('--labels_path', type=str, default='data/augmented/casme3/labels.xlsx')
-    parser.add_argument('--val_size', type=float, default=0.2)
-    parser.add_argument('--subject_independent', action='store_true', default=True)
-    parser.add_argument('--no_subject_independent', action='store_false', dest='subject_independent')
-    parser.add_argument('--include_augmented', action='store_true', default=False)
-    parser.add_argument('--seed', type=int, default=1)
-    parser.add_argument('--target_col', type=str, default='emotion')
-    parser.add_argument('--drop_others', action='store_true', default=True, help="Drop samples with 'others' class after remapping to 3-class scheme")
-    parser.add_argument('--no_drop_others', action='store_false', dest='drop_others')
-    parser.add_argument('--remap_classes', action='store_true', default=False, help="Remap classes to positive, negative, surprise")
-    parser.add_argument('--k_folds', type=int, default=5, help="Number of folds for cross-validation (1 = single split)")
-    parser.add_argument('--current_fold', type=int, default=None, 
-                        help="If set — train only this fold. If None and k_folds > 1 — train all folds sequentially")
-
-    # ==================== TrainingConfig ====================
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--num_epochs', type=int, default=100)
-    parser.add_argument('--patience_early_stop', type=int, default=40)
-    parser.add_argument('--grad_clip_max_norm', type=float, default=5.0)
-    parser.add_argument('--device', type=str, choices=['cuda', 'cpu'], default='cuda')
-    parser.add_argument('--scheduler', type=str, choices=['cosine', 'plateau'], default='cosine')
-    parser.add_argument('--scheduler_factor', type=float, default=0.5, help="For plateau scheduler")
-    parser.add_argument('--scheduler_patience', type=int, default=7, help="For plateau scheduler")
-
-    # ==================== Debug options ====================
-    parser.add_argument('--debug', action='store_true', default=False, help="If set, collect and log MIL attention scores/weights on validation")
-
-    # ==================== GNNConfig ====================
-    parser.add_argument('--gnn_hidden_dims', type=int, nargs='+', default=[64, 128, 256], help="Example: --gnn_hidden_dims 32 64 128")
-    parser.add_argument('--gnn_fusion_dim', type=int, default=256, help="Use negative value (e.g. -1) to set None")
-    parser.add_argument('--gnn_dropout', type=float, default=0.3)
-
-    # ==================== Temporal Model Selection ====================
-    parser.add_argument('--temporal_model', type=str, choices=['transformer', 'mil'], default='transformer', help="Choose temporal model: transformer or mil")
-
-    # ==================== TransformerConfig ====================
-    parser.add_argument('--transformer_embed_dim', type=int, default=256)
-    parser.add_argument('--transformer_num_layers', type=int, default=6)
-    parser.add_argument('--transformer_num_heads', type=int, default=8)
-    parser.add_argument('--transformer_ff_dim', type=int, default=None, help="Use negative value (e.g. -1) to set None")
-    parser.add_argument('--transformer_dropout', type=float, default=0.2)
-    parser.add_argument('--use_cls_token', action='store_true', default=True)
-    parser.add_argument('--no_cls_token', action='store_false', dest='use_cls_token')
-
-    # ==================== MILConfig ====================
-    parser.add_argument('--mil_d_model', type=int, default=512)
-    parser.add_argument('--mil_kernel_size', type=int, default=3)
-    parser.add_argument('--mil_num_conv_layers', type=int, default=1)
-    parser.add_argument('--mil_dropout', type=float, default=0.3)
-    parser.add_argument('--mil_temperature', type=float, default=1.0)
-    parser.add_argument('--mil_use_residual', action='store_true', default=False)
-    parser.add_argument('--no_mil_use_residual', action='store_false', dest='mil_use_residual')
-
+    parser = create_training_parser()
     args = parser.parse_args()
-    
-    dataset_cfg = DatasetConfig(
-        data_root=args.data_root,
-        labels_path=args.labels_path,
-        val_size=args.val_size,
-        subject_independent=args.subject_independent,
-        include_augmented=args.include_augmented,
-        seed=args.seed,
-        target_col=args.target_col,
-        drop_others=args.drop_others,
-        remap_classes=args.remap_classes,
-        k_folds=args.k_folds,
-        current_fold=args.current_fold if args.current_fold is not None else 0,
-    )
-
-    training_cfg = TrainingConfig(
-        batch_size=args.batch_size,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        num_epochs=args.num_epochs,
-        patience_early_stop=args.patience_early_stop,
-        grad_clip_max_norm=args.grad_clip_max_norm,
-        device=args.device,
-        scheduler=args.scheduler,
-        scheduler_factor=args.scheduler_factor,
-        scheduler_patience=args.scheduler_patience,
-    )
-
-    gnn_fusion_dim = args.gnn_fusion_dim
-    if (args.gnn_fusion_dim is None) or (args.gnn_fusion_dim < 0):
-        gnn_fusion_dim = None 
-    gnn_cfg = GNNConfig(
-        hidden_dims=args.gnn_hidden_dims,
-        fusion_dim=gnn_fusion_dim,
-        dropout=args.gnn_dropout,
-    )
-
-    transformer_ff_dim = args.transformer_ff_dim
-    if (args.transformer_ff_dim is None) or (args.transformer_ff_dim < 0):
-        transformer_ff_dim = None 
-    transformer_cfg = TransformerConfig(
-        embed_dim=args.transformer_embed_dim,
-        num_layers=args.transformer_num_layers,
-        num_heads=args.transformer_num_heads,
-        ff_dim=transformer_ff_dim,
-        dropout=args.transformer_dropout,
-        use_cls_token=args.use_cls_token,
-    )
-
-    mil_cfg = MILConfig(
-        d_model=args.mil_d_model,
-        kernel_size=args.mil_kernel_size,
-        num_conv_layers=args.mil_num_conv_layers,
-        dropout=args.mil_dropout,
-        temperature=args.mil_temperature,
-        use_residual=args.mil_use_residual,
-    )
+    dataset_cfg, training_cfg, gnn_cfg, transformer_cfg, mil_cfg, rnn_cfg = create_train_configs(args)
 
     if args.k_folds > 1 and args.current_fold is None:
         print(f"Starting {args.k_folds}-fold cross-validation")
@@ -898,6 +758,7 @@ if __name__ == "__main__":
                     gnn_cfg=gnn_cfg,
                     transformer_cfg=transformer_cfg,
                     mil_cfg=mil_cfg,
+                    rnn_cfg=rnn_cfg,
                     temporal_model=args.temporal_model,
                     debug=args.debug,
                     is_cv_fold=True,
@@ -939,6 +800,7 @@ if __name__ == "__main__":
             gnn_cfg=gnn_cfg,
             transformer_cfg=transformer_cfg,
             mil_cfg=mil_cfg,
+            rnn_cfg=rnn_cfg,
             temporal_model=args.temporal_model,
             debug=args.debug,
             is_cv_fold=False,

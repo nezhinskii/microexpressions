@@ -204,6 +204,68 @@ class FacialTemporalTransformer(nn.Module):
         
         return representation
     
+class FacialRNN(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int = 256,
+        num_layers: int = 2,
+        dropout: float = 0.3,
+        bidirectional: bool = True,
+        rnn_type: str = 'gru',
+    ):
+        super().__init__()
+        
+        self.bidirectional = bidirectional
+        self.num_directions = 2 if bidirectional else 1
+        self.hidden_size = hidden_size
+        self.rnn_type = rnn_type.lower()
+        
+        if self.rnn_type == 'gru':
+            rnn_class = nn.GRU
+        elif self.rnn_type == 'lstm':
+            rnn_class = nn.LSTM
+        else:
+            raise ValueError("rnn_type must be 'gru' or 'lstm'")
+        
+        self.rnn = rnn_class(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=bidirectional,
+            batch_first=True
+        )
+        
+        self.output_dim = hidden_size * self.num_directions     
+        
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass.
+        
+        Args:
+            x: Padded tensor of shape [batch_size, max_seq_len, input_size]
+            lengths: Tensor of shape [batch_size] containing real sequence lengths
+            
+        Returns:
+            representation: Tensor of shape [batch_size, output_dim]
+                           Last hidden state of the RNN (concatenated if bidirectional)
+        """
+        packed = nn.utils.rnn.pack_padded_sequence(
+            x,
+            lengths.cpu(),
+            batch_first=True,
+            enforce_sorted=False
+        )
+        _, hidden = self.rnn(packed)
+        # For LSTM: hidden is a tuple (h_n, c_n) → take only h_n
+        if self.rnn_type == 'lstm':
+            hidden = hidden[0]
+        # hidden shape: [num_layers * num_directions, batch_size, hidden_size]
+        representation = hidden[-self.num_directions:, :, :]   # [num_directions, B, H]
+        # Reshape: [B, num_directions, H] → [B, num_directions * H]
+        representation = representation.permute(1, 0, 2).reshape(x.size(0), -1)
+        return representation
 
 class SequencePadder(nn.Module):
     def forward(self, seqs, lengths):
@@ -360,6 +422,10 @@ class MicroExpressionModel(nn.Module):
                 return logits, scores, attn_weights
             else:
                 return logits
+        elif self.temporal_model in ['gru', 'lstm']:
+            representation = self.temporal_module(padded_seqs, lengths)
+            logits = self.classifier(representation)
+            return logits
         else:
             raise ValueError(f"Unknown temporal_model: {self.temporal_model}")
 
