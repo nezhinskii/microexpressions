@@ -297,7 +297,7 @@ def process_fragment(
         ar = w / h
         if abs(ar - 1.0) > 1e-6:
             corrected_landmarks = []
-            for lm in calibrated_landmarks:
+            for lm in fragment_landmarks:
                 if lm is None:
                     corrected_landmarks.append(None)
                     continue

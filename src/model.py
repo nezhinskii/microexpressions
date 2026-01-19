@@ -2,79 +2,75 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from torch_geometric.nn import GATConv, global_mean_pool
+from torch_geometric.nn import GATConv, global_mean_pool, global_max_pool
 from torch_geometric.nn.norm import LayerNorm
 from torch_geometric.data import Data, Batch
 
-
 class FacialGNN(nn.Module):
-    def __init__(self, hidden_dims=[32, 64, 128], fusion_dim=None, dropout=0.2):
+    def __init__(self, hidden_dims=[32, 64, 128], fusion_dim=None, dropout=0.2, pool='mean'):
         super().__init__()
         
         self.hidden_dims = hidden_dims
+        self.num_layers = len(hidden_dims)
         self.fusion_dim = fusion_dim 
         self.use_fusion = fusion_dim is not None
+        self.pool = pool
         
-        self.gat1 = GATConv(in_channels=4, out_channels=hidden_dims[0] // 4, heads=4, concat=True, 
-                            dropout=dropout, add_self_loops=True, edge_dim=2)
-        self.gat2 = GATConv(in_channels=hidden_dims[0], out_channels=hidden_dims[1] // 4, heads=4, concat=True, 
-                            dropout=dropout, add_self_loops=True, edge_dim=2)
-        self.gat3 = GATConv(in_channels=hidden_dims[1], out_channels=hidden_dims[2], heads=1, concat=False, 
-                            dropout=dropout, add_self_loops=True, edge_dim=2)
+        self.gats = nn.ModuleList()
+        self.norms = nn.ModuleList()
         
-        self.norm1 = LayerNorm(hidden_dims[0])
-        self.norm2 = LayerNorm(hidden_dims[1])
-        self.norm3 = LayerNorm(hidden_dims[2])
+        in_channels = 5
+        for i in range(self.num_layers):
+            if i < self.num_layers - 1:
+                out_channels = hidden_dims[i] // 4
+                heads = 4
+                concat = True
+            else:
+                out_channels = hidden_dims[i]
+                heads = 1
+                concat = False
+            
+            gat = GATConv(in_channels=in_channels, out_channels=out_channels, heads=heads, concat=concat, 
+                          dropout=dropout, add_self_loops=True, edge_dim=6)
+            self.gats.append(gat)
+            
+            norm = LayerNorm(hidden_dims[i])
+            self.norms.append(norm)
+            
+            in_channels = hidden_dims[i]
+            
         self.dropout = nn.Dropout(dropout)
 
         if self.use_fusion:
-            self.proj1 = nn.Linear(hidden_dims[0], fusion_dim)
-            self.proj2 = nn.Linear(hidden_dims[1], fusion_dim)
-            self.proj3 = nn.Linear(hidden_dims[2], fusion_dim)
-            
-            self.alpha_mlp1 = nn.Linear(fusion_dim, 1)
-            self.alpha_mlp2 = nn.Linear(fusion_dim, 1)
-            self.alpha_mlp3 = nn.Linear(fusion_dim, 1)
+            self.projs = nn.ModuleList([nn.Linear(hdim, fusion_dim) for hdim in hidden_dims])
+            self.alpha_mlps = nn.ModuleList([nn.Linear(fusion_dim, 1) for _ in hidden_dims])
         else:
-            self.final_dim = hidden_dims[2]
+            self.final_dim = hidden_dims[-1]
 
     def forward(self, x, edge_index, batch, edge_attr=None):
-        x1 = self.gat1(x, edge_index, edge_attr=edge_attr)
-        x1 = self.norm1(x1, batch)
-        x1 = F.relu(x1)
-        x1 = self.dropout(x1)
-        
-        if self.use_fusion:
-            g1 = global_mean_pool(x1, batch)
-            proj_g1 = self.proj1(g1)
-
-        x2 = self.gat2(x1, edge_index, edge_attr=edge_attr)
-        x2 = self.norm2(x2, batch)
-        x2 = F.relu(x2)
-        x2 = self.dropout(x2)
-        
-        if self.use_fusion:
-            g2 = global_mean_pool(x2, batch)
-            proj_g2 = self.proj2(g2)
-
-        x3 = self.gat3(x2, edge_index, edge_attr=edge_attr)
-        x3 = self.norm3(x3, batch)
-        x3 = F.relu(x3)
-        if self.use_fusion:
-            x3 = self.dropout(x3)
-        
-        if self.use_fusion:
-            g3 = global_mean_pool(x3, batch)
-            proj_g3 = self.proj3(g3)
+        gs = []
+        if self.pool == 'mean':
+            global_pool_op = global_mean_pool
+        else:
+            global_pool_op = global_max_pool
             
-            alpha1 = torch.sigmoid(self.alpha_mlp1(proj_g1))
-            alpha2 = torch.sigmoid(self.alpha_mlp2(proj_g2))
-            alpha3 = torch.sigmoid(self.alpha_mlp3(proj_g3))
+        for i in range(self.num_layers):
+            x = self.gats[i](x, edge_index, edge_attr=edge_attr)
+            x = self.norms[i](x, batch)
+            x = F.relu(x)
+            x = self.dropout(x)
             
-            fused = alpha1 * proj_g1 + alpha2 * proj_g2 + alpha3 * proj_g3
+            if self.use_fusion:
+                g = global_pool_op(x, batch)
+                proj_g = self.projs[i](g)
+                gs.append(proj_g)
+        
+        if self.use_fusion:
+            alphas = [torch.sigmoid(self.alpha_mlps[i](gs[i])) for i in range(self.num_layers)]
+            fused = sum(alphas[i] * gs[i] for i in range(self.num_layers))
             return fused
         else:
-            return global_mean_pool(x3, batch)
+            return global_pool_op(x, batch)
 
 class MILPooling(nn.Module):
     def __init__(
@@ -153,7 +149,9 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 class FacialTemporalTransformer(nn.Module):
-    def __init__(self, embed_dim: int = 128,
+    def __init__(self, 
+            input_dim: int,
+            embed_dim: int = 128,
             num_layers: int = 4,
             num_heads: int = 8,
             ff_dim: int = None,
@@ -164,6 +162,8 @@ class FacialTemporalTransformer(nn.Module):
         
         self.embed_dim = embed_dim
         self.use_cls_token = use_cls_token
+        
+        self.input_proj = nn.Linear(input_dim, embed_dim) if input_dim != embed_dim else nn.Identity()
         
         if use_cls_token:
             self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
@@ -187,6 +187,8 @@ class FacialTemporalTransformer(nn.Module):
         """
         x: [batch_size, seq_len, embed_dim]
         """
+        x = self.input_proj(x)          # [B, L, input_dim] → [B, L, embed_dim]
+        
         batch_size = x.shape[0]
         
         if self.use_cls_token:
@@ -312,15 +314,21 @@ class MicroExpressionModel(nn.Module):
         delta_to_anchor = selected_points - anchor
         if prev_points is None:
             delta_prev = torch.zeros_like(selected_points)
+            mag = torch.zeros(selected_points.shape[0], 1, device=points.device)
         else:
             prev_selected = prev_points[17:68]
             prev_anchor = compute_anchor(prev_points)
             prev_delta_to_anchor = prev_selected - prev_anchor
             delta_prev = delta_to_anchor - prev_delta_to_anchor
+            mag = torch.norm(delta_prev, dim=1, keepdim=True)
             
+        iod = torch.norm(points[39] - points[42]) + 1e-8
+        mag = mag / iod
+        
         verticies = torch.cat([
             delta_to_anchor,
-            delta_prev
+            delta_prev,
+            mag
         ], dim=1)
         
         parts = {
@@ -340,10 +348,10 @@ class MicroExpressionModel(nn.Module):
         edge_list.extend([(36, 41), (42, 47), (48, 59), (60, 67)])
         edge_list.extend([(21, 27), (22, 27), (30, 33)])
         edge_list.extend([(17, 36), (21, 39), (22, 42), (26, 45)])
-        edge_list.extend([(38, 27), (39, 27), (40, 27), (42, 27), (43, 27), (47, 27)])
-        edge_list.extend([(36, 31), (39, 31), (40, 31), (41, 31)])
-        edge_list.extend([(42, 35), (45, 35), (46, 35), (47, 35)])
-        edge_list.extend([(48, 31), (49, 31), (53, 35), (54, 35)])
+        edge_list.extend([(39, 27), (42, 27)])
+        edge_list.extend([(36, 31), (39, 31)])
+        edge_list.extend([(42, 35), (45, 35)])
+        edge_list.extend([(48, 31), (54, 35)])
         edge_list.extend([(48, 60), (54, 64)])
         edge_list_reverse = [(end, start) for start, end in edge_list]
         edge_list.extend(edge_list_reverse)
@@ -354,18 +362,27 @@ class MicroExpressionModel(nn.Module):
             src, dst = edge_index[0], edge_index[1]
             diffs = selected_pts[src] - selected_pts[dst]
             lengths = torch.norm(diffs, dim=1)
-            return lengths / iod
+            angles = torch.atan2(diffs[:, 1], diffs[:, 0])
+            sin_angles = torch.sin(2 * angles)
+            cos_angles = torch.cos(2 * angles)
+            return lengths / iod, sin_angles, cos_angles
 
-        norm_lengths = compute_normalized_lengths(selected_points, points, edge_index)
+        norm_lengths, sin_angles, cos_angles = compute_normalized_lengths(selected_points, points, edge_index)
         
         if prev_points is not None:
             prev_selected = prev_points[17:68]
-            prev_norm_lengths = compute_normalized_lengths(prev_selected, prev_points, edge_index)
+            prev_norm_lengths, prev_sin, prev_cos = compute_normalized_lengths(prev_selected, prev_points, edge_index)
+            
             delta_norm_lengths = norm_lengths - prev_norm_lengths
+            
+            delta_sin = sin_angles - prev_sin
+            delta_cos = cos_angles - prev_cos
         else:
             delta_norm_lengths = torch.zeros_like(norm_lengths)
+            delta_sin = torch.zeros_like(sin_angles)
+            delta_cos = torch.zeros_like(cos_angles)
 
-        edge_attr = torch.stack([norm_lengths, delta_norm_lengths], dim=1)
+        edge_attr = torch.stack([norm_lengths, delta_norm_lengths, sin_angles, cos_angles, delta_sin, delta_cos], dim=1)
         
         return verticies, edge_index, edge_attr
     

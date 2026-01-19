@@ -28,12 +28,16 @@ class TrainingConfig:
     scheduler: str = 'cosine'
     scheduler_factor: float = 0.5
     scheduler_patience: int = 7
+    use_warmup: bool = False
+    warmup_epochs: int = 8
+    label_smoothing: float = 0.0
 
 @dataclass
 class GNNConfig:
     hidden_dims: list[int] = field(default_factory=lambda: [32, 64, 128])
     fusion_dim: int | None = None
     dropout: float = 0.2
+    pool: str = 'mean'
 
 @dataclass
 class TransformerConfig:
@@ -91,6 +95,9 @@ def create_training_parser() -> argparse.ArgumentParser:
     parser.add_argument('--scheduler', type=str, choices=['cosine', 'plateau', 'cosine-restarts'], default='cosine')
     parser.add_argument('--scheduler_factor', type=float, default=0.5, help="For plateau scheduler")
     parser.add_argument('--scheduler_patience', type=int, default=7, help="For plateau scheduler")
+    parser.add_argument('--use_warmup', action='store_true', default=False)
+    parser.add_argument('--warmup_epochs', type=int, default=8)
+    parser.add_argument('--label_smoothing', type=float, default=0.0)
 
     # ==================== Debug options ====================
     parser.add_argument('--debug', action='store_true', default=False, help="If set, collect and log MIL attention scores/weights on validation")
@@ -99,6 +106,7 @@ def create_training_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gnn_hidden_dims', type=int, nargs='+', default=[64, 128, 256], help="Example: --gnn_hidden_dims 32 64 128")
     parser.add_argument('--gnn_fusion_dim', type=int, default=256, help="Use negative value (e.g. -1) to set None")
     parser.add_argument('--gnn_dropout', type=float, default=0.3)
+    parser.add_argument('--gnn_pool', type=str, choices=['mean', 'max'], default='cuda')
 
     # ==================== Temporal Model Selection ====================
     parser.add_argument('--temporal_model', type=str, choices=['transformer', 'mil', 'gru', 'lstm'], 
@@ -126,7 +134,7 @@ def create_training_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rnn_hidden_size", type=int, default=256, help="Hidden size for RNN")
     parser.add_argument("--rnn_num_layers", type=int, default=2, help="Number of RNN layers")
     parser.add_argument("--rnn_dropout", type=float, default=0.3, help="Dropout for RNN")
-    parser.add_argument("--rnn_bidirectional", action='store_true', default=True, help="Use bidirectional RNN")
+    parser.add_argument("--rnn_bidirectional", action='store_true', default=False, help="Use bidirectional RNN")
     
     return parser
 
@@ -156,6 +164,9 @@ def create_train_configs(args: Namespace):
         scheduler=args.scheduler,
         scheduler_factor=args.scheduler_factor,
         scheduler_patience=args.scheduler_patience,
+        use_warmup=args.use_warmup,
+        warmup_epochs=args.warmup_epochs,
+        label_smoothing=args.label_smoothing
     )
 
     gnn_fusion_dim = args.gnn_fusion_dim
@@ -165,6 +176,7 @@ def create_train_configs(args: Namespace):
         hidden_dims=args.gnn_hidden_dims,
         fusion_dim=gnn_fusion_dim,
         dropout=args.gnn_dropout,
+        pool=args.gnn_pool
     )
 
     transformer_ff_dim = args.transformer_ff_dim

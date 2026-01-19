@@ -327,13 +327,21 @@ def _build_model(
     gnn = FacialGNN(
         hidden_dims=gnn_cfg.hidden_dims,
         fusion_dim=gnn_cfg.fusion_dim,
-        dropout=gnn_cfg.dropout
+        dropout=gnn_cfg.dropout,
+        pool=gnn_cfg.pool
+    )
+    
+    gnn_output_dim = (
+        gnn_cfg.fusion_dim
+        if gnn_cfg.fusion_dim is not None
+        else gnn_cfg.hidden_dims[-1]
     )
 
     # ----- Temporal module -----
     if temporal_model == 'transformer':
         assert isinstance(temporal_cfg, TransformerConfig)
         temporal_module = FacialTemporalTransformer(
+            input_dim=gnn_output_dim,
             embed_dim=temporal_cfg.embed_dim,
             num_layers=temporal_cfg.num_layers,
             num_heads=temporal_cfg.num_heads,
@@ -344,10 +352,9 @@ def _build_model(
         embed_dim = temporal_cfg.embed_dim
     elif temporal_model == 'mil':
         assert isinstance(temporal_cfg, MILConfig)
-        frame_dim = gnn_cfg.fusion_dim if gnn_cfg.fusion_dim is not None else gnn_cfg.hidden_dims[-1]
 
         temporal_module = MILPooling(
-            frame_dim=frame_dim,
+            frame_dim=gnn_output_dim,
             d_model=temporal_cfg.d_model,
             kernel_size=temporal_cfg.kernel_size,
             num_conv_layers=temporal_cfg.num_conv_layers,
@@ -358,10 +365,9 @@ def _build_model(
         embed_dim = temporal_cfg.d_model
     elif temporal_model in ['gru', 'lstm']:
         assert isinstance(rnn_cfg, RNNConfig), "For GRU/LSTM use rnn_cfg"
-        frame_dim = gnn_cfg.fusion_dim if gnn_cfg.fusion_dim is not None else gnn_cfg.hidden_dims[-1]
         
         temporal_module = FacialRNN(
-            input_size=frame_dim,
+            input_size=gnn_output_dim,
             hidden_size=rnn_cfg.hidden_size,
             num_layers=rnn_cfg.num_layers,
             dropout=rnn_cfg.dropout,
@@ -402,9 +408,12 @@ def _train_epoch(model, loader, optimizer, criterion, device, grad_clip_norm, lr
 
         optimizer.step()
 
-        if (lr_scheduler is not None) and (warmup_scheduler is not None):
+        if warmup_scheduler:
             with warmup_scheduler.dampening():
-                lr_scheduler.step()
+                pass
+
+        if lr_scheduler and training_cfg.scheduler in ['cosine', 'cosine-restarts']:
+            lr_scheduler.step()
 
         total_loss += loss.item() * labels.size(0)
         preds = logits.argmax(dim=1).cpu().numpy()
@@ -530,32 +539,36 @@ def train(
     ).to(device)
 
     # 3. Optimizer & co
-    criterion = torch.nn.CrossEntropyLoss(weight=weights)
+    criterion = torch.nn.CrossEntropyLoss(weight=weights, label_smoothing=training_cfg.label_smoothing)
     # criterion = FocalLoss(gamma=2.5, alpha=weights, task_type='multi-class', num_classes=len(weights))
     optimizer = AdamW(model.parameters(), lr=training_cfg.lr, weight_decay=training_cfg.weight_decay)
 
     lr_scheduler = None
+    warmup_scheduler = None
+
+    total_batches = len(train_loader) * training_cfg.num_epochs
     if training_cfg.scheduler == 'cosine':
-        num_steps = len(train_loader) * training_cfg.num_epochs
-        lr_scheduler = CosineAnnealingLR(optimizer, T_max=num_steps)
-        warmup_scheduler = warmup_scheduler = warmup.LinearWarmup(
-            optimizer,
-            warmup_period=len(train_loader) * 8
-        )
-    elif training_cfg.scheduler == 'plateau':
-        lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=training_cfg.scheduler_factor, patience=training_cfg.scheduler_patience, verbose=True)
-        warmup_scheduler = None
+        lr_scheduler = CosineAnnealingLR(optimizer, T_max=total_batches)
     elif training_cfg.scheduler == 'cosine-restarts':
         lr_scheduler = CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=20,
+            T_0=20 * len(train_loader),
             T_mult=2,
-            eta_min=1e-5,
-            last_epoch=-1
+            eta_min=1e-6
         )
-        warmup_scheduler = None
+    elif training_cfg.scheduler == 'plateau':
+        lr_scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=training_cfg.scheduler_factor,
+            patience=training_cfg.scheduler_patience,
+        )
     else:
         raise ValueError(f"Unknown scheduler: {training_cfg.scheduler}")
+    
+    if training_cfg.use_warmup:
+        warmup_period = len(train_loader) * training_cfg.warmup_epochs
+        warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period=warmup_period)
 
     mlflow.set_experiment('ME_model_training')
     run_name = f"Fold_{fold_idx}" if is_cv_fold else "Single_Run"
@@ -569,6 +582,7 @@ def train(
             "val_samples": val_samples,
             "classes": label_map,
             "class_mapping": class_mapping,
+            "class_weights": weights,
             "loss": "FocalLoss" if isinstance(criterion, FocalLoss) else "CrossEntropyLoss",
         }
         if isinstance(criterion, FocalLoss):
@@ -586,8 +600,10 @@ def train(
 
             if temporal_model == 'transformer':
                 params_to_log["temporal_cfg"] = transformer_cfg
-            else:
+            elif temporal_model == 'mil':
                 params_to_log["temporal_cfg"] = mil_cfg
+            else:
+                params_to_log["temporal_cfg"] = rnn_cfg
 
         for cls_name, idx in label_map.items():
             params_to_log[f"train_{cls_name}"] = train_class_counts.get(idx, 0)
@@ -618,7 +634,7 @@ def train(
                 criterion=criterion, 
                 device=device, 
                 grad_clip_norm=training_cfg.grad_clip_max_norm, 
-                lr_scheduler=lr_scheduler if training_cfg.scheduler == 'cosine' else None, 
+                lr_scheduler=lr_scheduler,
                 warmup_scheduler=warmup_scheduler
             )
 
@@ -643,9 +659,13 @@ def train(
             }, step=epoch)
 
             if training_cfg.scheduler == 'plateau':
-                lr_scheduler.step(val_loss)
-            if training_cfg.scheduler == 'cosine-restarts':
-                lr_scheduler.step()
+                if warmup_scheduler:
+                    with warmup_scheduler.dampening():
+                        lr_scheduler.step(val_loss)
+                else:
+                    lr_scheduler.step(val_loss)
+            elif training_cfg.scheduler in ['cosine', 'cosine-restarts']:
+                pass
 
             last_f1 = val_f1
             last_labels = val_labels.copy()
@@ -727,6 +747,12 @@ if __name__ == "__main__":
             cv_id = parent_run.info.run_id
             mlflow.set_tag("cv_id", cv_id)
             mlflow.set_tag("mode", "cross_validation")
+            
+            temporal_cfg = transformer_cfg
+            if args.temporal_model == 'mil':
+                temporal_cfg = mil_cfg
+            else:
+                temporal_cfg = rnn_cfg
 
             mlflow.log_params({
                 "k_folds": args.k_folds,
@@ -735,7 +761,7 @@ if __name__ == "__main__":
                 "dataset_cfg": dataset_cfg,
                 "training_cfg": training_cfg,
                 "gnn_cfg": gnn_cfg,
-                "temporal_cfg": transformer_cfg if args.temporal_model == 'transformer' else mil_cfg
+                "temporal_cfg": temporal_cfg
             })
 
             all_best_labels = []
@@ -794,7 +820,7 @@ if __name__ == "__main__":
         else:
             print("Training single split (no cross-validation)")
         
-        best_f1, val_labels, val_preds = train(
+        train(
             dataset_cfg=dataset_cfg,
             training_cfg=training_cfg,
             gnn_cfg=gnn_cfg,
