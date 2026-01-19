@@ -106,7 +106,7 @@ def create_training_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gnn_hidden_dims', type=int, nargs='+', default=[64, 128, 256], help="Example: --gnn_hidden_dims 32 64 128")
     parser.add_argument('--gnn_fusion_dim', type=int, default=256, help="Use negative value (e.g. -1) to set None")
     parser.add_argument('--gnn_dropout', type=float, default=0.3)
-    parser.add_argument('--gnn_pool', type=str, choices=['mean', 'max'], default='cuda')
+    parser.add_argument('--gnn_pool', type=str, choices=['mean', 'max'], default='mean')
 
     # ==================== Temporal Model Selection ====================
     parser.add_argument('--temporal_model', type=str, choices=['transformer', 'mil', 'gru', 'lstm'], 
