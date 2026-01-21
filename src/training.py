@@ -410,10 +410,11 @@ def _train_epoch(model, loader, optimizer, criterion, device, grad_clip_norm, lr
 
         if warmup_scheduler:
             with warmup_scheduler.dampening():
-                pass
-
-        if lr_scheduler and training_cfg.scheduler in ['cosine', 'cosine-restarts']:
-            lr_scheduler.step()
+                if lr_scheduler and training_cfg.scheduler in ['cosine', 'cosine-restarts']:
+                    lr_scheduler.step()
+        else:
+            if lr_scheduler and training_cfg.scheduler in ['cosine', 'cosine-restarts']:
+                lr_scheduler.step()
 
         total_loss += loss.item() * labels.size(0)
         preds = logits.argmax(dim=1).cpu().numpy()
