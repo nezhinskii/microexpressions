@@ -59,13 +59,13 @@ def filter_bad_fragments(fragments: pd.DataFrame, data_root:Path):
 def prepare_microexpression_datasets(
     data_root: str = 'data/augmented/casme3',
     labels_path: str = 'data/augmented/casme3/labels.xlsx',
-    val_size: float = 0.2,
     subject_independent: bool = True,
     include_augmented: bool = False,
     seed: int = 1,
     target_col: str = 'Objective class',
     k_folds: int = 1,
-    current_fold: int = 0
+    current_fold: int = 0,
+    max_train_samples: int | None = None
 ):
     set_seed(seed)
     data_root = Path(data_root)
@@ -89,59 +89,37 @@ def prepare_microexpression_datasets(
     
     fragments = filter_bad_fragments(fragments, data_root)
     
-    if k_folds > 1:
-        print(f"Using {k_folds}-fold CV, current fold: {current_fold}")
-        if subject_independent:
-            splitter = GroupKFold(n_splits=k_folds, shuffle=True, random_state=seed)
-            split = splitter.split(fragments, groups=fragments['Subject'])
-        else:
-            splitter = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed)
-            split = splitter.split(fragments, fragments[target_col])
-        
-        for fold_idx, (train_idx, val_idx) in enumerate(split):
-            if fold_idx == current_fold:
-                train_fragments = fragments.iloc[train_idx]
-                val_fragments = fragments.iloc[val_idx]
-                break
+    print(f"Using {k_folds}-fold CV, current fold: {current_fold}")
+    if subject_independent:
+        splitter = GroupKFold(n_splits=k_folds, shuffle=True, random_state=seed)
+        split = splitter.split(fragments, groups=fragments['Subject'])
+    else:
+        splitter = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed)
+        split = splitter.split(fragments, fragments[target_col])
+    
+    for fold_idx, (train_idx, val_idx) in enumerate(split):
+        if fold_idx == current_fold:
+            train_fragments = fragments.iloc[train_idx]
+            val_fragments = fragments.iloc[val_idx]
+            break
 
+    print(f"  Fold {current_fold}: Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
+    print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
+    print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
+    
+    if max_train_samples is not None and max_train_samples > 0 and len(train_fragments) > max_train_samples:
+        print(f"Original fragmets num limited from {len(train_fragments)} to {max_train_samples}")
+        sampled_fragments, _ = train_test_split(
+            train_fragments,
+            train_size=max_train_samples,
+            stratify=train_fragments[target_col],
+            random_state=seed
+        )
+        train_fragments = sampled_fragments.reset_index(drop=True)
         print(f"  Fold {current_fold}: Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
         print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
         print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
-    
-    else:
-        if subject_independent:
-            unique_subjects = fragments['Subject'].unique().tolist()
-            random.shuffle(unique_subjects)
-            total_frags = len(fragments)
-            train_subjects = []
-            val_subjects = []
-            val_full = False
-            for i, subj in enumerate(unique_subjects):
-                if (i % 2 == 0) or val_full:
-                    train_subjects.append(subj)
-                else:
-                    val_subjects.append(subj)
-                    if len(fragments[fragments['Subject'].isin(val_subjects)]) >= val_size * total_frags:
-                        val_full = True
-
-            train_fragments = fragments[fragments['Subject'].isin(train_subjects)]
-            val_fragments = fragments[fragments['Subject'].isin(val_subjects)]
-
-            print(f"  Train subjects: {len(train_subjects)}, Val subjects: {len(val_subjects)}")
-            print(f"  Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
-            print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
-            print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
-        else:
-            train_fragments, val_fragments = train_test_split(
-                fragments,
-                test_size=val_size,
-                random_state=seed,
-                stratify=fragments[target_col]
-            )
-            print(f"  Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
-            print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
-            print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
-    
+        
     def make_dataset(target_col, fragments_df, include_augmented_in_train=False):
         samples = []
         for _, row in fragments_df.iterrows():
@@ -216,20 +194,20 @@ def me_collate_fn(batch):
 
 
 def _build_dataloaders(
-    data_root, labels_path, val_size, subject_independent,
+    data_root, labels_path, subject_independent,
     include_augmented, seed, target_col, batch_size, drop_others, remap_classes,
-    k_folds, current_fold
+    k_folds, current_fold, max_train_samples
 ):
     train_list, val_list, label_map = prepare_microexpression_datasets(
         data_root=data_root,
         labels_path=labels_path,
-        val_size=val_size,
         subject_independent=subject_independent,
         include_augmented=include_augmented,
         seed=seed,
         target_col=target_col,
         k_folds=k_folds,
-        current_fold=current_fold
+        current_fold=current_fold,
+        max_train_samples=max_train_samples
     )
     
     class_mapping = {
@@ -516,7 +494,6 @@ def train(
      class_mapping, train_class_counts, val_class_counts) = _build_dataloaders(
         data_root=dataset_cfg.data_root,
         labels_path=dataset_cfg.labels_path,
-        val_size=dataset_cfg.val_size,
         subject_independent=dataset_cfg.subject_independent,
         include_augmented=dataset_cfg.include_augmented,
         seed=dataset_cfg.seed,
@@ -525,7 +502,8 @@ def train(
         drop_others=dataset_cfg.drop_others,
         remap_classes=dataset_cfg.remap_classes,
         k_folds=dataset_cfg.k_folds,
-        current_fold=dataset_cfg.current_fold
+        current_fold=dataset_cfg.current_fold,
+        max_train_samples=dataset_cfg.max_train_samples
     )
     weights = weights.to(device)
     num_classes = len(label_map)

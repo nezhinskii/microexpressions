@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 class DatasetConfig:
     data_root: str = 'data/augmented/casme3'
     labels_path: str = 'data/augmented/casme3/labels.xlsx'
-    val_size: float = 0.2
     subject_independent: bool = True
     include_augmented: bool = False
     seed: int = 1
@@ -15,6 +14,7 @@ class DatasetConfig:
     remap_classes: bool = False
     k_folds: int = 1
     current_fold: int = 0
+    max_train_samples: int | None = None
 
 @dataclass
 class TrainingConfig:
@@ -69,20 +69,19 @@ def create_training_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train MicroExpression model")
 
     # ==================== DatasetConfig ====================
-    parser.add_argument('--data_root', type=str, default='data/augmented/casme3')
-    parser.add_argument('--labels_path', type=str, default='data/augmented/casme3/labels.xlsx')
-    parser.add_argument('--val_size', type=float, default=0.2)
+    parser.add_argument('--data_root', type=str, default='data/augmented/casme3_spotting')
+    parser.add_argument('--labels_path', type=str, default='data/augmented/casme3_spotting/labels.xlsx')
     parser.add_argument('--subject_independent', action='store_true', default=True)
     parser.add_argument('--no_subject_independent', action='store_false', dest='subject_independent')
     parser.add_argument('--include_augmented', action='store_true', default=False)
     parser.add_argument('--seed', type=int, default=1)
-    parser.add_argument('--target_col', type=str, default='emotion')
+    parser.add_argument('--target_col', type=str, default='ME')
     parser.add_argument('--drop_others', action='store_true', default=True, help="Drop samples with 'others' class after remapping to 3-class scheme")
     parser.add_argument('--no_drop_others', action='store_false', dest='drop_others')
     parser.add_argument('--remap_classes', action='store_true', default=False, help="Remap classes to positive, negative, surprise")
-    parser.add_argument('--k_folds', type=int, default=5, help="Number of folds for cross-validation (1 = single split)")
-    parser.add_argument('--current_fold', type=int, default=None, 
-                        help="If set — train only this fold. If None and k_folds > 1 — train all folds sequentially")
+    parser.add_argument('--k_folds', type=int, default=5, help="Number of folds for cross-validation")
+    parser.add_argument('--current_fold', type=int, default=None, help="If set — train only this fold. If None and k_folds > 1 — train all folds sequentially")
+    parser.add_argument('--max_train_samples', type=int, default=None, help="Max samples in train (None — all train).")
 
     # ==================== TrainingConfig ====================
     parser.add_argument('--batch_size', type=int, default=64)
@@ -142,7 +141,6 @@ def create_train_configs(args: Namespace):
     dataset_cfg = DatasetConfig(
         data_root=args.data_root,
         labels_path=args.labels_path,
-        val_size=args.val_size,
         subject_independent=args.subject_independent,
         include_augmented=args.include_augmented,
         seed=args.seed,
@@ -151,6 +149,7 @@ def create_train_configs(args: Namespace):
         remap_classes=args.remap_classes,
         k_folds=args.k_folds,
         current_fold=args.current_fold if args.current_fold is not None else 0,
+        max_train_samples=args.max_train_samples
     )
 
     training_cfg = TrainingConfig(
