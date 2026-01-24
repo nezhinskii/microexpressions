@@ -334,11 +334,11 @@ def process_fragment(
     calibrated_landmarks = calibrate_landmarks(frames, fragment_landmarks)
     stabilized_calibrated_landmarks = apply_stabilization(frames, calibrated_landmarks, inv_transforms)
     prepared_landmarks = smooth_landmarks_savgol(stabilized_calibrated_landmarks)
-    
+    raw_landmarks_to_save = smooth_landmarks_savgol(calibrated_landmarks)
     fragment_landmarks = prepared_landmarks 
     
     raw_lm_data = []
-    for filename, landmarks in zip(fragment_filenames, fragment_landmarks):
+    for filename, landmarks in zip(fragment_filenames, raw_landmarks_to_save):
         if landmarks is None:
             raise ValueError(f"No face found on {filename}")
         if isinstance(landmarks, torch.Tensor):
