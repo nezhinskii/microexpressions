@@ -7,6 +7,7 @@ import re
 import onnxruntime as ort
 import argparse
 import shutil
+from scipy.signal import savgol_filter
 from tqdm import tqdm
 from PIL import Image
 from alignment import align_face, detect_faces, create_session
@@ -119,23 +120,9 @@ def proctrustes_fragment_frames(meanface_path, fragment_landmarks, slice_for_ali
 
     return normalized_fragment
 
-# def get_face_bbox(landmarks: np.ndarray, width: int, height: int, scale_factor: float = 1.2) -> tuple[list[int], int]:
-#     min_x, min_y = np.min(landmarks, axis=0)
-#     max_x, max_y = np.max(landmarks, axis=0)
-#     center_x = (min_x + max_x) // 2
-#     center_y = (min_y + max_y) // 2
-#     base_size = int(max(max_x - min_x, max_y - min_y) * scale_factor)
-#     size = (base_size // 2 * 2)  # Make even
-#     x1 = max(center_x - size // 2, 0)
-#     y1 = max(center_y - size // 2, 0)
-#     size = min(width - x1, size)
-#     size = min(height - y1, size)
-#     x2, y2 = x1 + size, y1 + size
-#     return [int(x1), int(y1), int(x2), int(y2)], size
-
 def merge_landmarks(detected: list[np.ndarray], forward_pred: list[np.ndarray], backward_pred: list[np.ndarray],
                     prior_variance: np.ndarray, forward_status: np.ndarray = None, backward_status: np.ndarray = None,
-                    q_noise: float = 0.6, min_consistency_error: float = 5.0) -> tuple[np.ndarray, list[bool], np.ndarray]:
+                    q_noise: float = 0.2, min_consistency_error: float = 5.0) -> tuple[np.ndarray, list[bool], np.ndarray]:
     num_points = detected[0].shape[0]
     current_detected = detected[1]
     current_forward = forward_pred[1]
@@ -195,7 +182,7 @@ def calibrate_landmarks(frames: list[np.ndarray], normalized_landmarks: list[np.
     # Initialize tracking
     tracked_lms = [absolute_landmarks[0].astype(float)]
     num_points = absolute_landmarks[0].shape[0]
-    prior_variance = np.ones(num_points, dtype=float) * 2.0
+    prior_variance = np.ones(num_points, dtype=float) * 1.0
 
     # Pairwise tracking and merging
     for i in range(num_frames - 1):
@@ -237,6 +224,76 @@ def calibrate_landmarks(frames: list[np.ndarray], normalized_landmarks: list[np.
 
     return calibrated_normalized
 
+def compose_affine(T_first, T_then):
+    T_first_hom  = np.vstack([T_first,  [0., 0., 1.]])
+    T_then_hom   = np.vstack([T_then,   [0., 0., 1.]])
+    composed_hom = T_then_hom @ T_first_hom
+    return composed_hom[:2, :]
+
+def to_pixels(pts: np.ndarray, width: int, height: int) -> np.ndarray:
+    pts_pix = np.empty_like(pts)
+    pts_pix[:, 0] = (pts[:, 0] + 1) * (width / 2)
+    pts_pix[:, 1] = (pts[:, 1] + 1) * (height / 2)
+    return pts_pix.astype(np.float32)
+
+def to_normalized(pts_pix: np.ndarray, width: int, height: int) -> np.ndarray:
+    pts = np.empty_like(pts_pix)
+    pts[:, 0] = (pts_pix[:, 0] / (width / 2)) - 1
+    pts[:, 1] = (pts_pix[:, 1] / (height / 2)) - 1
+    return pts
+
+def stabilize_landmarks(frames: list[np.ndarray], landmarks: list[np.ndarray]) -> list[np.ndarray]:
+    height, width = frames[0].shape[:2]
+    n_frames = len(landmarks)
+    inv_transforms = [np.eye(2, 3, dtype=np.float32)]
+    cumulative_T = np.eye(2, 3, dtype=np.float32)
+    for i in range(n_frames - 1):
+        src_pix = to_pixels(landmarks[i], width, height)
+        dst_pix = to_pixels(landmarks[i + 1], width, height)
+        T_i, inliers = cv2.estimateAffinePartial2D(
+            src_pix, dst_pix,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=3.0,
+            maxIters=2000,
+            confidence=0.99
+        )
+        if T_i is None:
+            T_i = np.eye(2, 3, dtype=np.float32)
+        # cumulative = T_i @ cumulative_old
+        cumulative_T = compose_affine(T_i, cumulative_T)
+        inv_cumulative = cv2.invertAffineTransform(cumulative_T)
+        inv_transforms.append(inv_cumulative)
+    return inv_transforms
+
+def apply_stabilization(frames: list[np.ndarray], landmarks: list[np.ndarray], inv_transforms: list[np.ndarray]) -> list[np.ndarray]:
+    height, width = frames[0].shape[:2]
+    stabilized = []
+    for i, lm in enumerate(landmarks):
+        inv_T = inv_transforms[i]
+        lm_pix = to_pixels(lm, width, height)
+        stabilized_pix = cv2.transform(np.expand_dims(lm_pix, axis=0), inv_T)[0]
+        stabilized.append(to_normalized(stabilized_pix, width, height))
+    return stabilized
+
+def smooth_landmarks_savgol(landmarks: list[np.ndarray], window_length: int = 5, polyorder: int = 2) -> list[np.ndarray]:
+    if len(landmarks) < window_length:
+        return [lm.copy() for lm in landmarks]
+    n_frames = len(landmarks)
+    n_points = 68
+    traj = np.stack(landmarks, axis=0)          # shape: (n_frames, 68, 2)
+    smoothed = np.empty_like(traj)
+    for p in range(n_points):
+        for coord in range(2):
+            signal = traj[:, p, coord]
+            smoothed[:, p, coord] = savgol_filter(
+                signal,
+                window_length=window_length,
+                polyorder=polyorder,
+                mode='interp'
+            )
+    smoothed_list = [smoothed[i] for i in range(n_frames)]
+    return smoothed_list
+
 def process_fragment(
     base_path:str, 
     fragment_data:pd.Series, 
@@ -272,9 +329,14 @@ def process_fragment(
         pil_frames = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in frames]
         transformed_frames = torch.stack([lm_model_transforms(frame) for frame in pil_frames])
     fragment_landmarks = run_landmark_model(lm_model_type, lm_model, transformed_frames, lm_extra_data, device)
-    # calibration step (FLCM)
+    # stabilization + calibration (FLCM) + smoothing 
+    inv_transforms = stabilize_landmarks(frames, fragment_landmarks)
     calibrated_landmarks = calibrate_landmarks(frames, fragment_landmarks)
-    fragment_landmarks = calibrated_landmarks 
+    stabilized_calibrated_landmarks = apply_stabilization(frames, calibrated_landmarks, inv_transforms)
+    prepared_landmarks = smooth_landmarks_savgol(stabilized_calibrated_landmarks)
+    
+    fragment_landmarks = prepared_landmarks 
+    
     raw_lm_data = []
     for filename, landmarks in zip(fragment_filenames, fragment_landmarks):
         if landmarks is None:
