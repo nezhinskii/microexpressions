@@ -1,6 +1,5 @@
 import argparse
 import os
-import mlflow
 import torch
 import dlib
 from tqdm import tqdm
@@ -175,11 +174,11 @@ model_points = np.array([
 ], dtype="double")
 landmark_indices = [30, 8, 36, 45, 48, 54]
 def get_angles(landmarks, img_size):
-    width = height = img_size
+    height, width = img_size
     image_points = []
     for i in landmark_indices:
-        x_norm = landmarks[f'x{i}']
-        y_norm = landmarks[f'y{i}']
+        x_norm = landmarks[i][0]
+        y_norm = landmarks[i][1]
         x_pixel = (x_norm + 1) / 2 * width
         y_pixel = (y_norm + 1) / 2 * height
         image_points.append((x_pixel, y_pixel))
@@ -237,7 +236,7 @@ def get_landmarks(
     transforms_image = get_transforms(model_type)
     
     dataset = ImageDataset(input_path, transform=transforms_image)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     results = []
     for batch_images, batch_filenames in tqdm(dataloader, desc="Processing batches"):
         batch_images = batch_images.to(device)
@@ -250,12 +249,15 @@ def get_landmarks(
                 continue
             if isinstance(landmarks, torch.Tensor):
                 landmarks = landmarks.cpu().numpy()
-            landmarks = landmarks.flatten()
             result = {'filename': filename}
             for i in range(68):
-                result[f'x{i}'] = landmarks[2 * i]
-                result[f'y{i}'] = landmarks[2 * i + 1]
-            yaw, pitch, roll = get_angles(result, batch_images.shape[2])
+                result[f'x{i}'] = landmarks[i][0]
+                result[f'y{i}'] = landmarks[i][1]
+            if batch_images.shape[1] == 3:
+                img_size = batch_images.shape[2:]
+            else:
+                img_size = batch_images.shape[1:3]
+            yaw, pitch, roll = get_angles(landmarks, img_size)
             result['yaw'] = yaw
             result['pitch'] = pitch
             result['roll'] = roll
@@ -278,26 +280,16 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda:0", help="Device to run model on")
     args = parser.parse_args()
     
-    mlflow.set_experiment("landmark")
-    with mlflow.start_run():
-        mlflow.log_param("input_path", args.input)
-        mlflow.log_param("input_name", args.input_name)
-        mlflow.log_param("output_path", args.output)
-        mlflow.log_param("model_path", args.model)
-        mlflow.log_param("model_type", args.model_type)
-        mlflow.log_param("meanface_path", args.meanface_path)
-        mlflow.log_param("face_detector_path", args.face_detector_path)
-        mlflow.log_param("device", args.device)
-        mlflow.log_param("batch_size", args.batch_size)
+    get_landmarks(
+        args.input, 
+        args.input_name, 
+        args.output, 
+        args.model, 
+        args.model_type, 
+        args.device, 
+        args.batch_size, 
+        args.face_detector_path,
+        args.meanface_path
+    )
         
-        get_landmarks(
-            args.input, 
-            args.input_name, 
-            args.output, 
-            args.model, 
-            args.model_type, 
-            args.device, 
-            args.batch_size, 
-            args.face_detector_path,
-            args.meanface_path
-        )
+        
