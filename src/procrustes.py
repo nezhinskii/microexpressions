@@ -23,8 +23,7 @@ def compute_similarity_params(target_points, reference_points, slice_for_alignme
         centered_target = centered_target[slice_for_alignment]
         centered_ref = centered_ref[slice_for_alignment]
 
-    R_raw, _ = orthogonal_procrustes(centered_target, centered_ref)
-    R = R_raw.T
+    R, _ = orthogonal_procrustes(centered_target, centered_ref)
 
     if not allow_reflection and np.linalg.det(R) < 0:
         R[:, -1] *= -1

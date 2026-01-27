@@ -26,7 +26,7 @@ def plot_landmarks_cv2(image_path, landmarks, radius=1):
         cv2.circle(img, (x, y), radius=radius, color=(0, 255, 0), thickness=-1)
     return img
 
-def plot_emb_with_images(df: pd.DataFrame, lm_df: pd.DataFrame, n_clusters=20, n_reps_per_cluster=1, random_state=42, image_dir=r"data\processed\aligned_celeba_hq"):
+def plot_emb_with_images(df: pd.DataFrame, lm_df: pd.DataFrame, n_clusters=20, n_reps_per_cluster=1, random_state=42, image_dir=r"data\processed\aligned_celeba_hq", plot_lm=True):
     df = df.copy()
     has_clusters = 'cluster' in df.columns
     if not has_clusters:
@@ -59,7 +59,10 @@ def plot_emb_with_images(df: pd.DataFrame, lm_df: pd.DataFrame, n_clusters=20, n
         x, y, filename = rep['x0'], rep['x1'], rep['filename']
         lm_row = lm_df[lm_df['filename'] == filename].iloc[0]
         image_path = os.path.join(image_dir, filename)
-        img = plot_landmarks_cv2(image_path, lm_row, radius=2)
+        if plot_lm:
+            img = plot_landmarks_cv2(image_path, lm_row, radius=2)
+        else:
+            img = cv2.imread(image_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
         def crop_black_borders_and_resize(img_np, target_size=100):
