@@ -1,52 +1,88 @@
 import os
 import shutil
-import pandas as pd
-import numpy as np
 import re
-import argparse
+import joblib
+import cv2
 import random
-from tqdm import tqdm
+import argparse
+import numpy as np
+import pandas as pd
 from scipy.interpolate import RBFInterpolator
-from types_of_faces import get_fragment_features_center
+from filter_and_cluster_faces import predict_cluster_for_new_face
+from preprocess_faces import process_embeddings
 
-def find_farthest_clusters(num_farthest, fragment_features_center, centers_path=r'models\types_of_faces\centers_df.csv', k_nearest=9):
-    centers_df = pd.read_csv(centers_path)
-    id_center_dict = {k: np.array(list(v.values())) for k, v in centers_df.set_index('face_type').to_dict('index').items()}
+def ger_fragment_cluster(
+    fragment_images_base_path:str,
+    original_fragment_pr_lm_df:pd.DataFrame,
+    cluster_type:str,
+    clusterer_path:str,
+    reducer_path:str
+):
+    fragment_landmarks = []
+    coord_columns = [column for column in original_fragment_pr_lm_df.columns if re.match(r'(n_)?[xy]\d+', column)]
+    for _, row in original_fragment_pr_lm_df.iterrows():
+        frame_landmarks = row[coord_columns]
+        fragment_landmarks.append(frame_landmarks.to_numpy().astype(np.float32))
+    fragment_filenames = original_fragment_pr_lm_df['filename']
+    
+    clusterer = joblib.load(clusterer_path)
+    reducer = None
+    if cluster_type == 'landmarks':
+        if reducer_path is None:
+            raise ValueError("reducer_path required for landmarks")
+        reducer = joblib.load(reducer_path)
+        features = fragment_landmarks
+    else:
+        batch_size = 32
+        fragment_embeddings = []
+        for i in range(0, len(fragment_filenames), batch_size):
+            batch_filenames = fragment_filenames[i:i + batch_size]
+            batch_images = np.array([cv2.imread(os.path.join(fragment_images_base_path, filename)) for filename in batch_filenames])
+            batch_embeddings = process_embeddings(batch_images)
+            fragment_embeddings.extend(batch_embeddings)
+        fragment_embeddings = [emb for emb in fragment_embeddings if emb is not None]
+    features = np.array(features)
+    fragment_clusters = predict_cluster_for_new_face(
+        new_landmarks_or_embedding=features,
+        clusterer=clusterer,
+        cluster_type=cluster_type,
+        reducer=reducer,
+    )
+    values, counts = np.unique(fragment_clusters, return_counts=True)
+    most_frequent = values[counts.argmax()]
+    return most_frequent
 
-    distances_to_center = {}
-    for id, center in id_center_dict.items():
-        dist = np.linalg.norm(center - fragment_features_center)
-        distances_to_center[id] = dist
-
-    sorted_clusters_by_distance = sorted(distances_to_center.items(), key=lambda x: x[1])
-    nearest_clusters = dict(sorted_clusters_by_distance[:k_nearest])
-    remaining_centers = {id: center for id, center in id_center_dict.items() if id not in nearest_clusters}
-    remaining_ids = list(remaining_centers.keys())
-    selected_indices = random.sample(remaining_ids, num_farthest)
-    return selected_indices
-
-def prepare_mean_faces(typed_faces_df, procrustes_lm_df):
-    merged_df = typed_faces_df.merge(procrustes_lm_df, on=['filename'])
-    mean_faces = {}
-    for type_id in merged_df['face_type'].unique():
-        if type_id == -1:
+def prepare_cluster_faces(faces_clusters_path):
+    df = pd.read_hdf(faces_clusters_path)
+    cluster_faces = {}
+    columns = [column for column in df.columns if re.match(r'(n_)?[xy]\d+', column)] + ['filename']
+    for cluster_id in df['cluster_id'].unique():
+        if cluster_id == -1:
             continue
-        current_type_faces = merged_df[merged_df['face_type'] == type_id]
-        coord_columns = [column for column in current_type_faces.columns if re.match(r'(n_)?[xy]\d+', column)]
-        mean_faces[type_id] = current_type_faces[coord_columns].mean().to_numpy().reshape(-1, 2)
-    return mean_faces
+        current_type_faces = df[df['cluster_id'] == cluster_id]
+        cluster_faces[cluster_id] = [row for _, row in current_type_faces[columns].iterrows()]
+    return cluster_faces
 
 def augment_fragment(
     original_fragment_pr_lm_df:pd.DataFrame,
-    original_fragment_features_df:pd.DataFrame, 
-    mean_faces:dict, 
-    types_of_faces_scaler_path:str,
-    types_of_faces_centers_path:str,
+    fragment_images_base_path:str,
+    cluster_faces:dict,
+    cluster_type:str,
+    clusterer_path:str,
+    reducer_path:str,
     num_augments:int=4, 
     smoothing:float=0.01
 ):
-    fragment_features_center = get_fragment_features_center(original_fragment_features_df, types_of_faces_scaler_path)
-    farthest_clusters = find_farthest_clusters(num_augments, fragment_features_center, types_of_faces_centers_path)
+    fragment_cluster = ger_fragment_cluster(
+        fragment_images_base_path=fragment_images_base_path,
+        original_fragment_pr_lm_df=original_fragment_pr_lm_df,
+        cluster_type=cluster_type,
+        clusterer_path=clusterer_path,
+        reducer_path=reducer_path,
+    )
+    other_clusters = list(cluster_faces.keys())
+    other_clusters.remove(fragment_cluster)
+    target_clusters = random.sample(other_clusters, num_augments)
 
     def fit_tps(source_points, target_points, smoothing):
         interpolator = RBFInterpolator(source_points, target_points, kernel='thin_plate_spline', smoothing=smoothing)
@@ -55,32 +91,39 @@ def augment_fragment(
     def apply_tps(interpolator, input_points):
         return interpolator(input_points)
     
-    procrustes_fragment_lm = []
+    fragment_landmarks = []
+    coord_columns = [column for column in original_fragment_pr_lm_df.columns if re.match(r'(n_)?[xy]\d+', column)]
     for _, row in original_fragment_pr_lm_df.iterrows():
-        fragment_landmarks = row[[ind for ind in row.index if re.match(r'(n_)?[xy]\d+', ind)]]
-        procrustes_fragment_lm.append(fragment_landmarks.to_numpy().reshape(-1, 2).astype(np.float32))
-    
-    onset_points = procrustes_fragment_lm[0]
+        frame_landmarks = row[coord_columns]
+        fragment_landmarks.append(frame_landmarks.to_numpy().astype(np.float32).reshape(-1, 2))
+    onset_points = fragment_landmarks[0]
     augmented_dict = {}
-    for cl_id in farthest_clusters:
-        target_points = mean_faces[cl_id]
+    augmented_dict_filenames = {}
+    for cl_id in target_clusters:
+        target_cluster_faces = cluster_faces[cl_id]
+        target_face_row = random.choice(target_cluster_faces)
+        target_face_filename = target_face_row['filename']
+        target_face_points = target_face_row[coord_columns].to_numpy().astype(np.float32).reshape(-1, 2)
         target_points_slice = slice(17, 68)
-        interpolator = fit_tps(onset_points[target_points_slice], target_points[target_points_slice], smoothing)
+        interpolator = fit_tps(onset_points[target_points_slice], target_face_points[target_points_slice], smoothing)
         augmented_sequence = []
-        for frame in procrustes_fragment_lm:
+        for frame in fragment_landmarks:
             augmented_frame = apply_tps(interpolator, frame)
             augmented_sequence.append(augmented_frame)
         augmented_dict[cl_id] = augmented_sequence
-    return augmented_dict, procrustes_fragment_lm
+        augmented_dict_filenames[cl_id] = target_face_filename
+    return augmented_dict, augmented_dict_filenames
 
 def augment_dataset(
-    me_lm_base_path:str=r'data\me_landmarks\casme3',
-    output_base_path:str=r'data\augmented\casme3',
-    me_anno_path:str=r'data\me_landmarks\casme3\labels.xlsx',
-    typed_faces_path:str=r'data\landmarks\typed_features_celeba_hq_pipnet.h5',
-    procrustes_faces_lm_path:str=r'data\landmarks\pr_lm_celeba_hq_pipnet.h5',
-    types_of_faces_model_base_path:str=r'models\types_of_faces',
-    num_augments:int=4, 
+    me_lm_base_path:str=r'data\me_landmarks\casme3_spotting',
+    output_base_path:str=r'data\augmented\casme3_spotting',
+    me_anno_path:str=r'data\me_landmarks\casme3_spotting\labels.xlsx',
+    me_images_base_path:str=r'data\raw\casme3_spotting',
+    cluster_type:str='landmarks',
+    clusterer_path:str=r'models\face_clustering\cluster_model_landmarks_kmeans.pkl',
+    reducer_path:str=r'models\face_clustering\reducer_model_landmarks.pkl',
+    faces_clusters_path:str=r'data\processed_faces\cl_celeba_hq_landmarks_kmeans.h5',
+    num_augments:int=4,
     smoothing:float=0.015
 ):
     me_df = pd.read_excel(me_anno_path)
@@ -97,35 +140,36 @@ def augment_dataset(
         bad_images_dest_path = os.path.join(output_base_path, 'bad_images.txt')
         shutil.copy2(bad_images_path, bad_images_dest_path)
         
-    typed_faces_df = pd.read_hdf(typed_faces_path)
-    procrustes_lm_df = pd.read_hdf(procrustes_faces_lm_path)
-    mean_faces = prepare_mean_faces(typed_faces_df, procrustes_lm_df)
-
-    types_of_faces_scaler_path = os.path.join(types_of_faces_model_base_path, 'scaler.pkl')
-    types_of_faces_centers_path = os.path.join(types_of_faces_model_base_path, 'centers_df.csv')
+    cluster_faces = prepare_cluster_faces(faces_clusters_path)
 
     fragment_dirs = set(os.listdir(me_lm_base_path))
-
-    for index, row in tqdm(me_df.iterrows(), total=len(me_df)):
+    # for index, row in tqdm(me_df.iterrows(), total=len(me_df)):
+    me_df = pd.read_excel(me_anno_path)
+    rows=list(me_df.iterrows())
+    random.seed(42)
+    random.shuffle(rows)
+    for index, row in rows[:15]:
         subject=row['Subject']; filename=row['Filename']; onset=row['Onset']; offset=row['Offset']
         fragment_dir = subject + '_' + filename + '_' + str(onset)
         if fragment_dir not in fragment_dirs:
             continue
         fragment_path = os.path.join(me_lm_base_path, fragment_dir)
+        fragment_images_path = os.path.join(me_images_base_path, fragment_dir)
 
         original_fragment_pr_lm_path = os.path.join(fragment_path, 'procrustes_lm.csv')
         original_fragment_pr_lm_df = pd.read_csv(original_fragment_pr_lm_path, sep=';', index_col=0)
         original_fragment_features_path = os.path.join(fragment_path, 'features.csv')
-        augmented_dict, procrustes_fragment_lm = augment_fragment(
+        augmented_dict, augmented_dict_filenames = augment_fragment(
+            fragment_images_base_path=fragment_images_path,
             original_fragment_pr_lm_df=original_fragment_pr_lm_df,
-            original_fragment_features_df=pd.read_csv(original_fragment_features_path, sep=';', index_col=0), 
-            mean_faces=mean_faces, 
-            types_of_faces_scaler_path=types_of_faces_scaler_path,
-            types_of_faces_centers_path=types_of_faces_centers_path,
-            num_augments=num_augments, 
-            smoothing=smoothing
+            cluster_faces=cluster_faces,
+            cluster_type=cluster_type,
+            clusterer_path=clusterer_path,
+            reducer_path=reducer_path,
+            num_augments=4, 
+            smoothing=0.01
         )
-
+        
         output_fragment_path = os.path.join(output_base_path, fragment_dir)
         os.makedirs(output_fragment_path, exist_ok=True)
         output_original_pr_lm_path = os.path.join(output_fragment_path, 'procrustes_lm_original.csv')
@@ -135,17 +179,20 @@ def augment_dataset(
         for cl_num, au_lm in augmented_dict.items():
             flat_au_lm = [frame_lm.reshape(-1) for frame_lm in au_lm]
             au_df = pd.DataFrame(flat_au_lm, columns=coord_columns)
+            au_face_filename = augmented_dict_filenames[cl_num]
             au_df.insert(0, "filename", original_fragment_pr_lm_df['filename'])
-            au_df.to_csv(os.path.join(output_fragment_path, f'procrustes_lm_{cl_num}.csv'), sep=';')
+            au_df.to_csv(os.path.join(output_fragment_path, f'procrustes_lm_{cl_num}_{au_face_filename[:-4]}.csv'), sep=';')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default=r'data\me_landmarks\casme3', help="Base path to ME dataset landmarks")
-    parser.add_argument("--output", default=r'data\augmented\casme3', help="Path to save augmented fragments")
-    parser.add_argument("--anno_path", default=r'data\me_landmarks\casme3\labels.xlsx', help="Path to ME dataset annotation")
-    parser.add_argument("--typed_faces_path", default=r'data\landmarks\typed_features_celeba_hq_starnet.h5', help="Path to dataset with types of faces")
-    parser.add_argument("--pr_faces_lm_path", default=r'data\landmarks\pr_lm_celeba_hq_starnet.h5', help="Path to dataset with faces landmarks")
-    parser.add_argument("--types_of_faces_model", default=r'models\types_of_faces', help="Path to model for face typization")
+    parser.add_argument("--input", default=r'data\me_landmarks\casme3_spotting', help="Base path to ME dataset landmarks")
+    parser.add_argument("--output", default=r'data\augmented\casme3_spotting', help="Path to save augmented fragments")
+    parser.add_argument("--anno_path", default=r'data\me_landmarks\casme3_spotting\labels.xlsx', help="Path to ME dataset annotation")
+    parser.add_argument("--images_base_path", default=r'data\raw\casme3_spotting', help="Path to raw dataset fragments")
+    parser.add_argument("--cluster_type", default='landmarks', choices=['embeddings', 'landmarks'], help="Clustering space")
+    parser.add_argument("--clusterer_path", default=r'models\face_clustering\cluster_model_landmarks_kmeans.pkl', help="Path to model for clustering")
+    parser.add_argument("--reducer_path", default=r'models\face_clustering\reducer_model_landmarks.pkl', help="Path to model for dim reducing (landmarks cluster_type)")
+    parser.add_argument("--faces_clusters_path", default=r'data\processed_faces\cl_celeba_hq_landmarks_kmeans.h5', help="Path to clustered faces")
     parser.add_argument("--num_augments", default=4, type=int, help="Number of augments for 1 fragment")
     parser.add_argument("--smoothing", default=0.01, type=float, help="smoothing value for TPS transform")
     args = parser.parse_args()
@@ -154,9 +201,11 @@ if __name__ == "__main__":
         me_lm_base_path=args.input,
         output_base_path=args.output,
         me_anno_path=args.anno_path,
-        typed_faces_path=args.typed_faces_path,
-        procrustes_faces_lm_path=args.pr_faces_lm_path,
-        types_of_faces_model_base_path=args.types_of_faces_model,
+        me_images_base_path=args.images_base_path,
+        cluster_type=args.cluster_type,
+        clusterer_path=args.clusterer_path,
+        reducer_path=args.reducer_path,
+        faces_clusters_path=args.faces_clusters_path,
         num_augments=args.num_augments, 
         smoothing=args.smoothing
     )
