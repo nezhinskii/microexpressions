@@ -10,8 +10,9 @@ import pandas as pd
 from scipy.interpolate import RBFInterpolator
 from filter_and_cluster_faces import predict_cluster_for_new_face
 from preprocess_faces import process_embeddings
+from scipy.signal import savgol_filter
 
-def ger_fragment_cluster(
+def get_fragment_cluster(
     fragment_images_base_path:str,
     original_fragment_pr_lm_df:pd.DataFrame,
     cluster_type:str,
@@ -71,9 +72,9 @@ def augment_fragment(
     clusterer_path:str,
     reducer_path:str,
     num_augments:int=4, 
-    smoothing:float=0.01
+    smoothing:float=0.015
 ):
-    fragment_cluster = ger_fragment_cluster(
+    fragment_cluster = get_fragment_cluster(
         fragment_images_base_path=fragment_images_base_path,
         original_fragment_pr_lm_df=original_fragment_pr_lm_df,
         cluster_type=cluster_type,
@@ -83,20 +84,43 @@ def augment_fragment(
     other_clusters = list(cluster_faces.keys())
     other_clusters.remove(fragment_cluster)
     target_clusters = random.sample(other_clusters, num_augments)
-
-    def fit_tps(source_points, target_points, smoothing):
-        interpolator = RBFInterpolator(source_points, target_points, kernel='thin_plate_spline', smoothing=smoothing)
-        return interpolator
-    
-    def apply_tps(interpolator, input_points):
-        return interpolator(input_points)
     
     fragment_landmarks = []
     coord_columns = [column for column in original_fragment_pr_lm_df.columns if re.match(r'(n_)?[xy]\d+', column)]
     for _, row in original_fragment_pr_lm_df.iterrows():
         frame_landmarks = row[coord_columns]
         fragment_landmarks.append(frame_landmarks.to_numpy().astype(np.float32).reshape(-1, 2))
-    onset_points = fragment_landmarks[0]
+        
+    regions = {
+        'contour': slice(0, 17),
+        'brows': slice(17, 27),
+        'nose': slice(27, 36),
+        'eyes': slice(36, 48),
+        'mouth': slice(48, 68),
+    }
+    
+    def calculate_ear(eye_points):
+        # eye_points: 6 pts per eye (e.g., left: 36-41)
+        # EAR = (||p2-p6|| + ||p3-p5||) / (2 * ||p1-p4||)
+        vert1 = np.linalg.norm(eye_points[1] - eye_points[5])
+        vert2 = np.linalg.norm(eye_points[2] - eye_points[4])
+        horiz = np.linalg.norm(eye_points[0] - eye_points[3])
+        return (vert1 + vert2) / (2.0 * horiz + 1e-6)
+    
+    fragment_last_idx = len(fragment_landmarks) - 1
+    
+    first_lm = fragment_landmarks[0]
+    last_lm = fragment_landmarks[fragment_last_idx]
+    left_eye_pts_first = first_lm[36:42]
+    right_eye_pts_first = first_lm[42:48]
+    ear_first = (calculate_ear(left_eye_pts_first) + calculate_ear(right_eye_pts_first)) / 2.0
+    left_eye_pts_last = last_lm[36:42]
+    right_eye_pts_last = last_lm[42:48]
+    ear_last = (calculate_ear(left_eye_pts_last) + calculate_ear(right_eye_pts_last)) / 2.0
+    
+    neutral_idx = 0 if ear_first >= ear_last else fragment_last_idx
+    neutral_src = fragment_landmarks[neutral_idx]
+
     augmented_dict = {}
     augmented_dict_filenames = {}
     for cl_id in target_clusters:
@@ -104,12 +128,33 @@ def augment_fragment(
         target_face_row = random.choice(target_cluster_faces)
         target_face_filename = target_face_row['filename']
         target_face_points = target_face_row[coord_columns].to_numpy().astype(np.float32).reshape(-1, 2)
-        target_points_slice = slice(17, 68)
-        interpolator = fit_tps(onset_points[target_points_slice], target_face_points[target_points_slice], smoothing)
+        
+        aug_neutral = target_face_points.copy()
         augmented_sequence = []
-        for frame in fragment_landmarks:
-            augmented_frame = apply_tps(interpolator, frame)
-            augmented_sequence.append(augmented_frame)
+        for i in range(len(fragment_landmarks)):
+            if  i == neutral_idx:
+                augmented_sequence.append(aug_neutral)
+                continue
+            aug_frame = aug_neutral.copy()
+            curr_src = fragment_landmarks[i]
+            # TPS per zone
+            for reg_name, reg_slice in regions.items():
+                delta_mapper = RBFInterpolator(
+                    neutral_src[reg_slice],
+                    curr_src[reg_slice],
+                    kernel='thin_plate_spline',
+                    smoothing=smoothing
+                )
+                aug_frame[reg_slice] = delta_mapper(aug_neutral[reg_slice])
+            augmented_sequence.append(aug_frame)
+            
+        if len(augmented_sequence) > 3:
+            aug_array = np.array(augmented_sequence)
+            for pt in range(68):
+                for dim in range(2):
+                    aug_array[:, pt, dim] = savgol_filter(aug_array[:, pt, dim], window_length=3, polyorder=2)
+            augmented_sequence = [fr for fr in aug_array]
+            
         augmented_dict[cl_id] = augmented_sequence
         augmented_dict_filenames[cl_id] = target_face_filename
     return augmented_dict, augmented_dict_filenames
@@ -166,8 +211,8 @@ def augment_dataset(
             cluster_type=cluster_type,
             clusterer_path=clusterer_path,
             reducer_path=reducer_path,
-            num_augments=4, 
-            smoothing=0.01
+            num_augments=num_augments, 
+            smoothing=smoothing
         )
         
         output_fragment_path = os.path.join(output_base_path, fragment_dir)
