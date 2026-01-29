@@ -7,6 +7,7 @@ import random
 import argparse
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 from scipy.interpolate import RBFInterpolator
 from filter_and_cluster_faces import predict_cluster_for_new_face
 from preprocess_faces import process_embeddings
@@ -188,12 +189,7 @@ def augment_dataset(
     cluster_faces = prepare_cluster_faces(faces_clusters_path)
 
     fragment_dirs = set(os.listdir(me_lm_base_path))
-    # for index, row in tqdm(me_df.iterrows(), total=len(me_df)):
-    me_df = pd.read_excel(me_anno_path)
-    rows=list(me_df.iterrows())
-    random.seed(42)
-    random.shuffle(rows)
-    for index, row in rows[:15]:
+    for index, row in tqdm(me_df.iterrows(), total=len(me_df)):
         subject=row['Subject']; filename=row['Filename']; onset=row['Onset']; offset=row['Offset']
         fragment_dir = subject + '_' + filename + '_' + str(onset)
         if fragment_dir not in fragment_dirs:

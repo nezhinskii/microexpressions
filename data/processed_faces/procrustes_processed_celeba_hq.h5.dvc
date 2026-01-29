@@ -1,0 +1,5 @@
+outs:
+- md5: a8be810c045a8f2dfacda43c7acdb1a9
+  size: 154998662
+  hash: md5
+  path: procrustes_processed_celeba_hq.h5

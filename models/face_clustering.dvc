@@ -1,0 +1,6 @@
+outs:
+- md5: 7d840b5e0844c9fc860e487a77031381.dir
+  size: 29314
+  nfiles: 2
+  hash: md5
+  path: face_clustering

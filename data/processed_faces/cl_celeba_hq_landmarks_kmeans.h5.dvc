@@ -1,0 +1,5 @@
+outs:
+- md5: 42ca3c3f626010a71020d1826bf735b5
+  size: 18380757
+  hash: md5
+  path: cl_celeba_hq_landmarks_kmeans.h5
