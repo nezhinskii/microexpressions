@@ -333,8 +333,10 @@ def process_fragment(
     inv_transforms = stabilize_landmarks(frames, fragment_landmarks)
     calibrated_landmarks = calibrate_landmarks(frames, fragment_landmarks)
     stabilized_calibrated_landmarks = apply_stabilization(frames, calibrated_landmarks, inv_transforms)
-    prepared_landmarks = smooth_landmarks_savgol(stabilized_calibrated_landmarks)
-    raw_landmarks_to_save = smooth_landmarks_savgol(calibrated_landmarks)
+    prepared_landmarks = stabilized_calibrated_landmarks
+    raw_landmarks_to_save = calibrated_landmarks
+    # prepared_landmarks = smooth_landmarks_savgol(stabilized_calibrated_landmarks)
+    # raw_landmarks_to_save = smooth_landmarks_savgol(calibrated_landmarks)
     fragment_landmarks = prepared_landmarks 
     
     raw_lm_data = []

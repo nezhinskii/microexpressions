@@ -60,7 +60,7 @@ def prepare_microexpression_datasets(
     data_root: str = 'data/augmented/casme3',
     labels_path: str = 'data/augmented/casme3/labels.xlsx',
     subject_independent: bool = True,
-    include_augmented: bool = False,
+    aug_num: int = 0,
     seed: int = 1,
     target_col: str = 'Objective class',
     k_folds: int = 1,
@@ -103,7 +103,7 @@ def prepare_microexpression_datasets(
             val_fragments = fragments.iloc[val_idx]
             break
 
-    print(f"  Fold {current_fold}: Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
+    print(f"Fold {current_fold}: Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
     print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
     print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
     
@@ -120,7 +120,7 @@ def prepare_microexpression_datasets(
         print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
         print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
         
-    def make_dataset(target_col, fragments_df, include_augmented_in_train=False):
+    def make_dataset(target_col, fragments_df, aug_num=0):
         samples = []
         for _, row in fragments_df.iterrows():
             folder_name = row['folder_name']
@@ -130,20 +130,25 @@ def prepare_microexpression_datasets(
             if original_csv.exists():
                 samples.append((str(original_csv), target_col_value))
     
-            if include_augmented_in_train:
+            if aug_num != 0:
+                aug_taken = 0
                 for aug_csv in (data_root / folder_name).glob("procrustes_lm_*.csv"):
                     if aug_csv.name != "procrustes_lm_original.csv":
                         samples.append((str(aug_csv), target_col_value))
+                        aug_taken += 1
+                    if aug_taken >= aug_num:
+                        break
         
         return samples
     
-    train_list = make_dataset(target_col, train_fragments, include_augmented_in_train=include_augmented)
-    val_list = make_dataset(target_col, val_fragments, include_augmented_in_train=False)
+    train_list = make_dataset(target_col, train_fragments, aug_num=aug_num)
+    val_list = make_dataset(target_col, val_fragments, aug_num=0)
+    val_aug_list = make_dataset(target_col, val_fragments, aug_num=aug_num)
     random.shuffle(train_list)
     random.shuffle(val_list)
 
     label_map = { cl_name:i for i, cl_name in enumerate(fragments[target_col].unique())}
-    return train_list, val_list, label_map
+    return train_list, val_list, val_aug_list, label_map
 
 
 class MicroExpressionDataset(Dataset):
@@ -195,14 +200,14 @@ def me_collate_fn(batch):
 
 def _build_dataloaders(
     data_root, labels_path, subject_independent,
-    include_augmented, seed, target_col, batch_size, drop_others, remap_classes,
+    aug_num, seed, target_col, batch_size, drop_others, remap_classes,
     k_folds, current_fold, max_train_samples
 ):
-    train_list, val_list, label_map = prepare_microexpression_datasets(
+    train_list, val_list, val_aug_list, label_map = prepare_microexpression_datasets(
         data_root=data_root,
         labels_path=labels_path,
         subject_independent=subject_independent,
-        include_augmented=include_augmented,
+        aug_num=aug_num,
         seed=seed,
         target_col=target_col,
         k_folds=k_folds,
@@ -238,18 +243,22 @@ def _build_dataloaders(
     
     if remap_classes:
         train_list_remapped = remap_sample_list(train_list)
-        val_list_remapped   = remap_sample_list(val_list)
+        val_list_remapped = remap_sample_list(val_list)
+        val_aug_list_remapped = remap_sample_list(val_aug_list)
     else:
         train_list_remapped = train_list
-        val_list_remapped   = val_list
+        val_list_remapped = val_list
+        val_aug_list_remapped = val_aug_list 
 
     if Path(data_root).parts[-1] == 'casmeii':
         train_list_remapped = [s for s in train_list_remapped if (s[1] != 'fear') and (s[1] != 'sadness')]
-        val_list_remapped   = [s for s in val_list_remapped   if (s[1] != 'fear') and (s[1] != 'sadness')]
+        val_list_remapped = [s for s in val_list_remapped if (s[1] != 'fear') and (s[1] != 'sadness')]
+        val_aug_list_remapped = [s for s in val_aug_list_remapped if (s[1] != 'fear') and (s[1] != 'sadness')]
 
     if drop_others:
         train_list_remapped = [s for s in train_list_remapped if s[1] != 'others']
-        val_list_remapped   = [s for s in val_list_remapped   if s[1] != 'others']
+        val_list_remapped = [s for s in val_list_remapped   if s[1] != 'others']
+        val_aug_list_remapped = [s for s in val_aug_list_remapped   if s[1] != 'others']
         print("Dropped 'others' class after remapping.")
     else:
         print("Kept 'others' class after remapping.")
@@ -260,39 +269,45 @@ def _build_dataloaders(
 
     train_labels = [label for _, label in train_list_remapped]
     val_labels = [label for _, label in val_list_remapped]
+    val_aug_labels = [label for _, label in val_aug_list_remapped]
     full_labels = [*train_labels, *val_labels] 
     print(f"Classes after remapping: {unique_labels}")
     print("Full distribution:", {k: (full_labels.count(k), full_labels.count(k) / len(full_labels)) for k in unique_labels})
     print("Train distribution:", {k: (train_labels.count(k), train_labels.count(k) / len(train_labels)) for k in unique_labels})
-    print("Val distribution:  ", {k: (val_labels.count(k), val_labels.count(k)   / len(val_labels))   for k in unique_labels})
+    print("Val distribution:  ", {k: (val_labels.count(k), val_labels.count(k) / len(val_labels))   for k in unique_labels})
+    print("Val Aug distribution:  ", {k: (val_aug_labels.count(k), val_aug_labels.count(k) / len(val_aug_labels))   for k in unique_labels})
 
     train_dataset = MicroExpressionDataset(train_list_remapped, label_map)
     val_dataset = MicroExpressionDataset(val_list_remapped, label_map)
+    val_aug_dataset = MicroExpressionDataset(val_aug_list_remapped, label_map)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=me_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=me_collate_fn)
+    val_aug_loader = DataLoader(val_aug_dataset, batch_size=batch_size, shuffle=False, collate_fn=me_collate_fn)
 
     train_labels_str = [sample[1] for sample in train_list_remapped]
     train_labels_int = [label_map[label] for label in train_labels_str]
 
     val_labels_str = [sample[1] for sample in val_list_remapped]
     val_labels_int = [label_map[label] for label in val_labels_str]
+    
+    val_aug_labels_str = [sample[1] for sample in val_aug_list_remapped]
+    val_aug_labels_int = [label_map[label] for label in val_aug_labels_str]
 
-    class_counts = Counter(train_labels_int)
+    train_class_counts = Counter(train_labels_int)
     num_classes = len(label_map)
-
     weights = []
     for i in range(num_classes):
-        weights.append(1.0 / class_counts.get(i, 1))
+        weights.append(1.0 / train_class_counts.get(i, 1))
     weights = torch.tensor(weights, dtype=torch.float)
     weights = weights / weights.sum() * num_classes
 
-    train_class_counts = Counter(train_labels_int)
     val_class_counts = Counter(val_labels_int)
+    val_aug_class_counts = Counter(val_aug_labels_int)
 
-    return (train_loader, val_loader, label_map, weights,
-            len(train_dataset), len(val_dataset), class_mapping,
-            train_class_counts, val_class_counts)
+    return (train_loader, val_loader, val_aug_loader, label_map, weights,
+            len(train_dataset), len(val_dataset), len(val_aug_dataset), class_mapping,
+            train_class_counts, val_class_counts, val_aug_class_counts)
 
 def _build_model(
     num_classes: int,
@@ -490,12 +505,15 @@ def train(
     print(f"Using device: {device}")
     print(f"Using temporal model: {temporal_model}")
 
-    (train_loader, val_loader, label_map, weights, train_samples, val_samples,
-     class_mapping, train_class_counts, val_class_counts) = _build_dataloaders(
+    (train_loader, val_loader, val_aug_loader,
+     label_map, weights, 
+     train_samples, val_samples, val_aug_samples,
+     class_mapping, 
+     train_class_counts, val_class_counts, val_aug_class_counts) = _build_dataloaders(
         data_root=dataset_cfg.data_root,
         labels_path=dataset_cfg.labels_path,
         subject_independent=dataset_cfg.subject_independent,
-        include_augmented=dataset_cfg.include_augmented,
+        aug_num=dataset_cfg.aug_num,
         seed=dataset_cfg.seed,
         target_col=dataset_cfg.target_col,
         batch_size=training_cfg.batch_size,
@@ -559,6 +577,7 @@ def train(
             "num_classes": num_classes,
             "train_samples": train_samples,
             "val_samples": val_samples,
+            "val_aug_samples": val_aug_samples,
             "classes": label_map,
             "class_mapping": class_mapping,
             "class_weights": weights,
@@ -586,7 +605,8 @@ def train(
 
         for cls_name, idx in label_map.items():
             params_to_log[f"train_{cls_name}"] = train_class_counts.get(idx, 0)
-            params_to_log[f"val_{cls_name}"]   = val_class_counts.get(idx, 0)
+            params_to_log[f"val_{cls_name}"] = val_class_counts.get(idx, 0)
+            params_to_log[f"val_aug_{cls_name}"] = val_aug_class_counts.get(idx, 0)
 
         mlflow.log_params(params_to_log)
 
@@ -604,6 +624,13 @@ def train(
         last_f1 = 0.0
         last_labels = None
         last_preds = None
+        
+        best_aug_f1_after_warmup = 0.0
+        best_aug_labels_after_warmup = None
+        best_aug_preds_after_warmup = None
+        last_aug_f1 = 0.0
+        last_aug_labels = None
+        last_aug_preds = None
 
         for epoch in range(training_cfg.num_epochs):
             train_loss, train_acc, train_f1 = _train_epoch(
@@ -620,12 +647,16 @@ def train(
             val_outputs = _validate_epoch(
                 model, val_loader, criterion, device, return_extras=debug
             )
-
             if debug:
                 val_loss, val_acc, val_f1, val_labels, val_preds, \
                 val_scores, val_attn, val_lengths, val_csv_paths = val_outputs
             else:
                 val_loss, val_acc, val_f1, val_labels, val_preds = val_outputs
+                
+                        
+            val_aug_loss, val_aug_acc, val_aug_f1, val_aug_labels, val_aug_preds = _validate_epoch(
+                model, val_aug_loader, criterion, device, return_extras=False
+            )
 
             mlflow.log_metrics({
                 f"train_loss": train_loss,
@@ -634,6 +665,9 @@ def train(
                 f"val_loss": val_loss,
                 f"val_acc": val_acc,
                 f"val_f1": val_f1,
+                f"val_aug_loss": val_aug_loss,
+                f"val_aug__acc": val_aug_acc,
+                f"val_aug__f1": val_aug_f1,
                 f"lr": optimizer.param_groups[0]['lr']
             }, step=epoch)
 
@@ -649,11 +683,19 @@ def train(
             last_f1 = val_f1
             last_labels = val_labels.copy()
             last_preds = val_preds.copy()
+            last_aug_f1 = val_aug_f1
+            last_aug_labels = val_aug_labels.copy()
+            last_aug_preds = val_aug_preds.copy()
             
-            if (epoch >= (training_cfg.num_epochs // 2)) and (val_f1 > best_f1_after_warmup):
+            if (epoch >= (training_cfg.num_epochs // 3)) and (val_f1 > best_f1_after_warmup):
                 best_f1_after_warmup = val_f1
                 best_labels_after_warmup = val_labels.copy()
                 best_preds_after_warmup = val_preds.copy()
+                
+            if (epoch >= (training_cfg.num_epochs // 3)) and (val_aug_f1 > best_aug_f1_after_warmup):
+                best_aug_f1_after_warmup = val_aug_f1
+                best_aug_labels_after_warmup = val_aug_labels.copy()
+                best_aug_preds_after_warmup = val_aug_preds.copy()
 
             # Save checkpoints
             torch.save(model.state_dict(), last_path)
@@ -691,7 +733,8 @@ def train(
                 mlflow.log_artifact(str(save_dir / f"{prefix}_val_preds.npy"))
 
             print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} "
-                  f"| Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f} | Best Val F1: {best_val_f1:.4f}")
+                  f"| Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f} | Best Val F1: {best_val_f1:.4f}"
+                  f"| Val Aug Loss: {val_aug_loss:.4f} | Val Aug Acc: {val_aug_acc:.4f} | Val Aug F1: {val_aug_f1:.4f} ")
 
             # if early_stop_counter >= training_cfg.patience_early_stop:
             #     print("Early stopping")
@@ -700,6 +743,8 @@ def train(
         mlflow.log_metrics({
             f"best_f1_after_warmup": best_f1_after_warmup,
             f"last_f1": last_f1,
+            f"best_aug_f1_after_warmup": best_aug_f1_after_warmup,
+            f"last_aug_f1": last_aug_f1,
         })
 
         # Confusion matrix
@@ -710,7 +755,9 @@ def train(
         
         return (
             best_f1_after_warmup, best_labels_after_warmup, best_preds_after_warmup,
-            last_f1, last_labels, last_preds
+            last_f1, last_labels, last_preds,
+            best_aug_f1_after_warmup, best_aug_labels_after_warmup, best_aug_preds_after_warmup,
+            last_aug_f1, last_aug_labels, last_aug_preds
         )
 
 if __name__ == "__main__":
@@ -749,6 +796,13 @@ if __name__ == "__main__":
             all_last_preds = []
             fold_best_f1s = []
             fold_last_f1s = []
+            
+            all_best_aug_labels = []
+            all_best_aug_preds = []
+            all_last_aug_labels = []
+            all_last_aug_preds = []
+            fold_best_aug_f1s = []
+            fold_last_aug_f1s = []
 
             for fold in range(args.k_folds):
                 print(f"\nFold {fold}/{args.k_folds-1}")
@@ -756,7 +810,9 @@ if __name__ == "__main__":
 
                 (
                     fold_best_f1, fold_best_labels, fold_best_preds,
-                    fold_last_f1, fold_last_labels, fold_last_preds
+                    fold_last_f1, fold_last_labels, fold_last_preds,
+                    fold_best_aug_f1, fold_best_aug_labels, fold_best_aug_preds,
+                    fold_last_aug_f1, fold_last_aug_labels, fold_last_aug_preds
                 ) = train(
                     dataset_cfg=dataset_cfg,
                     training_cfg=training_cfg,
@@ -774,14 +830,25 @@ if __name__ == "__main__":
                 all_best_preds.extend(fold_best_preds)
                 all_last_labels.extend(fold_last_labels)
                 all_last_preds.extend(fold_last_preds)
-
                 fold_best_f1s.append(fold_best_f1)
                 fold_last_f1s.append(fold_last_f1)
+                
+                all_best_aug_labels.extend(fold_best_aug_labels)
+                all_best_aug_preds.extend(fold_best_aug_preds)
+                all_last_aug_labels.extend(fold_last_aug_labels)
+                all_last_aug_preds.extend(fold_last_aug_preds)
+                fold_best_aug_f1s.append(fold_best_aug_f1)
+                fold_last_aug_f1s.append(fold_last_aug_f1)
 
             global_best_f1 = f1_score(all_best_labels, all_best_preds, average='macro')
             global_best_acc = accuracy_score(all_best_labels, all_best_preds)
             global_last_f1 = f1_score(all_last_labels, all_last_preds, average='macro')
             global_last_acc = accuracy_score(all_last_labels, all_last_preds)
+            
+            global_best_aug_f1 = f1_score(all_best_aug_labels, all_best_aug_preds, average='macro')
+            global_best_aug_acc = accuracy_score(all_best_aug_labels, all_best_aug_preds)
+            global_last_aug_f1 = f1_score(all_last_aug_labels, all_last_aug_preds, average='macro')
+            global_last_aug_acc = accuracy_score(all_last_aug_labels, all_last_aug_preds)
 
             mlflow.log_metrics({
                 "cv_global_best_f1": global_best_f1,
@@ -792,6 +859,15 @@ if __name__ == "__main__":
                 "cv_std_best_f1": np.std(fold_best_f1s),
                 "cv_mean_last_f1": np.mean(fold_last_f1s),
                 "cv_std_last_f1": np.std(fold_last_f1s),
+                
+                "cv_global_best_aug_f1": global_best_aug_f1,
+                "cv_global_best_aug_acc": global_best_aug_acc,
+                "cv_global_last_aug_f1": global_last_aug_f1,
+                "cv_global_last_aug_acc": global_last_aug_acc,
+                "cv_mean_best_aug_f1": np.mean(fold_best_aug_f1s),
+                "cv_std_best_aug_f1": np.std(fold_best_aug_f1s),
+                "cv_mean_last_aug_f1": np.mean(fold_last_aug_f1s),
+                "cv_std_last_aug_f1": np.std(fold_last_aug_f1s),
             })
     else:
         if args.k_folds > 1:

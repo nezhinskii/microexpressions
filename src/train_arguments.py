@@ -7,7 +7,7 @@ class DatasetConfig:
     data_root: str = 'data/augmented/casme3'
     labels_path: str = 'data/augmented/casme3/labels.xlsx'
     subject_independent: bool = True
-    include_augmented: bool = False
+    aug_num: int = 0
     seed: int = 1
     target_col: str = 'Objective class'
     drop_others: bool = True
@@ -73,7 +73,7 @@ def create_training_parser() -> argparse.ArgumentParser:
     parser.add_argument('--labels_path', type=str, default='data/augmented/casme3_spotting/labels.xlsx')
     parser.add_argument('--subject_independent', action='store_true', default=True)
     parser.add_argument('--no_subject_independent', action='store_false', dest='subject_independent')
-    parser.add_argument('--include_augmented', action='store_true', default=False)
+    parser.add_argument('--aug_num', type=int, default=0, help="Number of augment fragmetns for 1 original")
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--target_col', type=str, default='ME')
     parser.add_argument('--drop_others', action='store_true', default=True, help="Drop samples with 'others' class after remapping to 3-class scheme")
@@ -142,7 +142,7 @@ def create_train_configs(args: Namespace):
         data_root=args.data_root,
         labels_path=args.labels_path,
         subject_independent=args.subject_independent,
-        include_augmented=args.include_augmented,
+        aug_num=args.aug_num,
         seed=args.seed,
         target_col=args.target_col,
         drop_others=args.drop_others,
