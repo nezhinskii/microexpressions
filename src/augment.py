@@ -97,7 +97,7 @@ regions = {
 }
 
 smoothing_ranges = {
-    'eyes': (0.001, 0.05),
+    'eyes': (0.01, 0.07),
     'brows': (0.001, 0.05),
     'mouth': (0.001, 0.05),
     'contour': (0.001, 0.05),
