@@ -2,6 +2,7 @@ import pandas as pd
 import random
 import numpy as np
 import torch
+import math
 import mlflow
 from collections import Counter
 from torch.optim import AdamW
@@ -143,7 +144,7 @@ def prepare_microexpression_datasets(
     
     train_list = make_dataset(target_col, train_fragments, aug_num=aug_num)
     val_list = make_dataset(target_col, val_fragments, aug_num=0)
-    val_aug_list = make_dataset(target_col, val_fragments, aug_num=aug_num)
+    val_aug_list = make_dataset(target_col, val_fragments, aug_num=max(1, aug_num))
     random.shuffle(train_list)
     random.shuffle(val_list)
 
@@ -152,10 +153,11 @@ def prepare_microexpression_datasets(
 
 
 class MicroExpressionDataset(Dataset):
-    def __init__(self, sample_list, label_map):
+    def __init__(self, sample_list, label_map, simple_aug=False):
         self.samples = sample_list
         self.label_map = label_map
-
+        self.simple_aug = simple_aug
+        
     def __len__(self):
         return len(self.samples)
 
@@ -176,9 +178,38 @@ class MicroExpressionDataset(Dataset):
                 points.append([x, y])
             points = torch.tensor(points, dtype=torch.float)
             landmarks_list.append(points)
+        
+        if self.simple_aug:
+            landmarks_list = MicroExpressionDataset.apply_landmark_aug(landmarks_list)
 
         return landmarks_list, label, num_frames, csv_path
     
+    @staticmethod
+    def apply_landmark_aug(landmarks: list[torch.Tensor]):
+        landmarks = torch.stack([frame.clone() for frame in landmarks])
+        
+        p_noise = 0.5
+        p_rotate = 0.5
+        p_scale = 0.5
+        
+        if random.random() < p_noise:
+            noise = torch.randn_like(landmarks) * 25e-5
+            landmarks += noise
+        
+        centers = landmarks.mean(dim=1, keepdim=True)
+        
+        if random.random() < p_rotate:
+            angle = random.uniform(-3, 3) * math.pi / 180
+            cos_a = math.cos(angle)
+            sin_a = math.sin(angle)
+            rot_mat = torch.tensor([[cos_a, -sin_a], [sin_a, cos_a]], dtype=landmarks.dtype, device=landmarks.device)
+            landmarks = (landmarks - centers) @ rot_mat.T + centers
+        
+        if random.random() < p_scale:
+            scale = random.uniform(0.95, 1.05)
+            landmarks = centers + scale * (landmarks - centers)
+        
+        return [frame_lm for frame_lm in landmarks]
 
 def me_collate_fn(batch):
     landmarks_seqs = []
@@ -199,7 +230,7 @@ def me_collate_fn(batch):
 
 
 def _build_dataloaders(
-    data_root, labels_path, subject_independent,
+    data_root, labels_path, subject_independent, online_aug,
     aug_num, seed, target_col, batch_size, drop_others, remap_classes,
     k_folds, current_fold, max_train_samples
 ):
@@ -277,7 +308,7 @@ def _build_dataloaders(
     print("Val distribution:  ", {k: (val_labels.count(k), val_labels.count(k) / len(val_labels))   for k in unique_labels})
     print("Val Aug distribution:  ", {k: (val_aug_labels.count(k), val_aug_labels.count(k) / len(val_aug_labels))   for k in unique_labels})
 
-    train_dataset = MicroExpressionDataset(train_list_remapped, label_map)
+    train_dataset = MicroExpressionDataset(train_list_remapped, label_map, simple_aug=online_aug)
     val_dataset = MicroExpressionDataset(val_list_remapped, label_map)
     val_aug_dataset = MicroExpressionDataset(val_aug_list_remapped, label_map)
 
@@ -513,6 +544,7 @@ def train(
         data_root=dataset_cfg.data_root,
         labels_path=dataset_cfg.labels_path,
         subject_independent=dataset_cfg.subject_independent,
+        online_aug=dataset_cfg.online_aug,
         aug_num=dataset_cfg.aug_num,
         seed=dataset_cfg.seed,
         target_col=dataset_cfg.target_col,

@@ -123,14 +123,14 @@ def filter_and_cluster_faces(
     )
     
     if reducer:
-        joblib.dump(reducer, os.path.join(models_path, f"reducer_model_{cluster_type}.pkl"))
+        joblib.dump(reducer, os.path.join(models_path, f"reducer_model_{input_name}_{cluster_type}.pkl"))
 
     filtered_df['cluster_id'] = labels
 
     filename = f'cl_{input_name}_{cluster_type}_{cluster_method}.h5'
     output_path = os.path.join(output_dir, filename)
     filtered_df.to_hdf(output_path, key='landmarks', mode='w', format='table')
-    model_path = os.path.join(models_path, f"cluster_model_{cluster_type}_{cluster_method}.pkl")
+    model_path = os.path.join(models_path, f"cluster_model_{input_name}_{cluster_type}_{cluster_method}.pkl")
     joblib.dump(clusterer, model_path)
 
     print(f"Processed {len(filtered_df)} faces")
