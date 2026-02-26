@@ -97,19 +97,19 @@ regions = {
 }
 
 smoothing_ranges = {
-    'eyes': (0.01, 0.07),
-    'brows': (0.001, 0.05),
-    'mouth': (0.001, 0.05),
-    'contour': (0.001, 0.05),
-    'nose': (0.001, 0.05),
+    'eyes': (0.02, 0.05),
+    'brows': (0.01, 0.03),
+    'mouth': (0.01, 0.03),
+    'contour': (0.005, 0.02),
+    'nose': (0.005, 0.02),
 }
 
 amplitude_ranges = {
     'eyes': (0.9, 1.1),
-    'brows': (0.6, 1.4),
-    'mouth': (0.7, 1.3),
-    'contour': (0.8, 1.2),
-    'nose': (0.6, 1.4),
+    'brows': (0.85, 1.15),
+    'mouth': (0.85, 1.15),
+    'contour': (0.85, 1.15),
+    'nose': (0.85, 1.15),
 }
 
 def apply_temporal_aug(sequence, important_frames, aug_type, n, original_len):
@@ -172,7 +172,7 @@ def augment_zone_sequence(
             
     if np.random.rand() < 0.7:
         aug_type = random.choice(['drop', 'insert'])
-        n = random.randint(4, 7)
+        n = random.randint(4, 9)
         if aug_type == 'drop':
             estimated_remaining = num_frames - (num_frames // n)
             if estimated_remaining < 6:
@@ -208,7 +208,7 @@ def augment_fragment(
     )
     other_clusters = list(cluster_faces.keys())
     other_clusters.remove(fragment_cluster)
-    target_clusters = random.sample(other_clusters, num_augments)
+    target_clusters = random.choices(other_clusters, k=num_augments)
     
     fragment_landmarks = []
     coord_columns = [column for column in original_fragment_pr_lm_df.columns if re.match(r'(n_)?[xy]\d+', column)]
@@ -225,11 +225,10 @@ def augment_fragment(
             zone_sequences[reg_name].append(lm[reg_slice])
 
     augmented_dict = {}
-    augmented_dict_filenames = {}
     for cl_id in target_clusters:
         target_cluster_faces = cluster_faces[cl_id]
         target_face_row = random.choice(target_cluster_faces)
-        target_face_filename = target_face_row['filename']
+        target_face_filename = target_face_row['filename'][:-4]
         target_face_points = target_face_row[coord_columns].to_numpy().astype(np.float32).reshape(-1, 2)
         important_frames = [neutral_idx]
         if not np.isnan(fragment_apex):
@@ -243,9 +242,8 @@ def augment_fragment(
             important_frames=important_frames
         )
         
-        augmented_dict[cl_id] = augmented_sequence
-        augmented_dict_filenames[cl_id] = target_face_filename
-    return augmented_dict, augmented_dict_filenames
+        augmented_dict[f'{cl_id}_{target_face_filename}'] = augmented_sequence
+    return augmented_dict
 
 def augment_dataset(
     me_lm_base_path:str=r'data\me_landmarks\casme3_spotting',
@@ -291,7 +289,7 @@ def augment_dataset(
         original_fragment_pr_lm_path = os.path.join(fragment_path, 'procrustes_lm.csv')
         original_fragment_pr_lm_df = pd.read_csv(original_fragment_pr_lm_path, sep=';', index_col=0)
         original_fragment_features_path = os.path.join(fragment_path, 'features.csv')
-        augmented_dict, augmented_dict_filenames = augment_fragment(
+        augmented_dict = augment_fragment(
             fragment_images_base_path=fragment_images_path,
             original_fragment_pr_lm_df=original_fragment_pr_lm_df,
             cluster_faces=cluster_faces,
@@ -308,24 +306,23 @@ def augment_dataset(
         shutil.copy2(original_fragment_pr_lm_path, output_original_pr_lm_path)
 
         coord_columns = [column for column in original_fragment_pr_lm_df.columns if re.match(r'(n_)?[xy]\d+', column)]
-        for cl_num, au_lm in augmented_dict.items():
+        for cl_image, au_lm in augmented_dict.items():
             flat_au_lm = [frame_lm.reshape(-1) for frame_lm in au_lm]
             au_df = pd.DataFrame(flat_au_lm, columns=coord_columns)
-            au_face_filename = augmented_dict_filenames[cl_num]
             au_df.insert(0, "filename", original_fragment_pr_lm_df['filename'])
-            au_df.to_csv(os.path.join(output_fragment_path, f'procrustes_lm_{cl_num}_{au_face_filename[:-4]}.csv'), sep=';')
+            au_df.to_csv(os.path.join(output_fragment_path, f'procrustes_lm_{cl_image}.csv'), sep=';')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default=r'data\me_landmarks\casme3_spotting', help="Base path to ME dataset landmarks")
-    parser.add_argument("--output", default=r'data\augmented\casme3_spotting', help="Path to save augmented fragments")
-    parser.add_argument("--anno_path", default=r'data\me_landmarks\casme3_spotting\labels.xlsx', help="Path to ME dataset annotation")
-    parser.add_argument("--images_base_path", default=r'data\raw\casme3_spotting', help="Path to raw dataset fragments")
+    parser.add_argument("--input", default=r'data\me_landmarks\casme3', help="Base path to ME dataset landmarks")
+    parser.add_argument("--output", default=r'data\augmented\casme3_asian_stable', help="Path to save augmented fragments")
+    parser.add_argument("--anno_path", default=r'data\me_landmarks\casme3\labels.xlsx', help="Path to ME dataset annotation")
+    parser.add_argument("--images_base_path", default=r'data\raw\casme3', help="Path to raw dataset fragments")
     parser.add_argument("--cluster_type", default='landmarks', choices=['embeddings', 'landmarks'], help="Clustering space")
     parser.add_argument("--clusterer_path", default=r'models\face_clustering\cluster_model_landmarks_kmeans.pkl', help="Path to model for clustering")
     parser.add_argument("--reducer_path", default=r'models\face_clustering\reducer_model_landmarks.pkl', help="Path to model for dim reducing (landmarks cluster_type)")
     parser.add_argument("--faces_clusters_path", default=r'data\processed_faces\cl_celeba_hq_landmarks_kmeans.h5', help="Path to clustered faces")
-    parser.add_argument("--num_augments", default=4, type=int, help="Number of augments for 1 fragment")
+    parser.add_argument("--num_augments", default=50, type=int, help="Number of augments for 1 fragment")
     args = parser.parse_args()
     random.seed(42)
     augment_dataset(

@@ -154,7 +154,7 @@ class FacialTemporalTransformer(nn.Module):
             embed_dim: int = 128,
             num_layers: int = 4,
             num_heads: int = 8,
-            ff_dim: int = None,
+            ff_dim: int | None = None,
             dropout: float = 0.1,
             use_cls_token: bool = True
         ):
@@ -302,7 +302,7 @@ class MicroExpressionModel(nn.Module):
         self.classifier = nn.Linear(embed_dim, num_classes)
 
     @staticmethod
-    def build_graph(points: torch.Tensor, prev_points: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def build_graph(points: torch.Tensor, prev_points: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         def compute_anchor(pts: torch.Tensor) -> torch.Tensor:
             eye_left_inner = pts[39]
             eye_right_inner = pts[42]
@@ -357,7 +357,7 @@ class MicroExpressionModel(nn.Module):
         edge_list.extend(edge_list_reverse)
         edge_index = torch.tensor(edge_list, device=points.device).T - 17
         
-        def compute_normalized_lengths(selected_pts: torch.Tensor, full_pts: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        def compute_normalized_lengths(selected_pts: torch.Tensor, full_pts: torch.Tensor, edge_index: torch.Tensor):
             iod = torch.norm(full_pts[39] - full_pts[42]) + 1e-8
             src, dst = edge_index[0], edge_index[1]
             diffs = selected_pts[src] - selected_pts[dst]

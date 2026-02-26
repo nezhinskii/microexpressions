@@ -9,6 +9,8 @@ class DatasetConfig:
     subject_independent: bool = True
     online_aug: bool = False
     aug_num: int = 0
+    class_freq_aug: bool = False
+    no_aug_prob: float = 0.0
     seed: int = 1
     target_col: str = 'Objective class'
     drop_others: bool = True
@@ -32,6 +34,7 @@ class TrainingConfig:
     use_warmup: bool = False
     warmup_epochs: int = 8
     label_smoothing: float = 0.0
+    curriculum_epochs: list[int] = field(default_factory=lambda: [0])
 
 @dataclass
 class GNNConfig:
@@ -70,17 +73,19 @@ def create_training_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train MicroExpression model")
 
     # ==================== DatasetConfig ====================
-    parser.add_argument('--data_root', type=str, default='data/augmented/casme3_spotting')
-    parser.add_argument('--labels_path', type=str, default='data/augmented/casme3_spotting/labels.xlsx')
+    parser.add_argument('--data_root', type=str, default='data/augmented/casme3_asian')
+    parser.add_argument('--labels_path', type=str, default='data/augmented/casme3_asian/labels.xlsx')
     parser.add_argument('--subject_independent', action='store_true', default=True)
     parser.add_argument('--no_subject_independent', action='store_false', dest='subject_independent')
     parser.add_argument('--online_aug', action='store_true', default=False, help="Enable online augmentation (noise, rotate, scale)")
     parser.add_argument('--aug_num', type=int, default=0, help="Number of augment fragmetns for 1 original")
+    parser.add_argument('--class_freq_aug', action='store_true', default=False, help="Compute aug_num based on class frequencies")
+    parser.add_argument('--no_aug_prob', type=float, default=0.0)
     parser.add_argument('--seed', type=int, default=1)
-    parser.add_argument('--target_col', type=str, default='ME')
+    parser.add_argument('--target_col', type=str, default='emotion')
     parser.add_argument('--drop_others', action='store_true', default=True, help="Drop samples with 'others' class after remapping to 3-class scheme")
     parser.add_argument('--no_drop_others', action='store_false', dest='drop_others')
-    parser.add_argument('--remap_classes', action='store_true', default=False, help="Remap classes to positive, negative, surprise")
+    parser.add_argument('--remap_classes', action='store_true', default=True, help="Remap classes to positive, negative, surprise")
     parser.add_argument('--k_folds', type=int, default=5, help="Number of folds for cross-validation")
     parser.add_argument('--current_fold', type=int, default=None, help="If set — train only this fold. If None and k_folds > 1 — train all folds sequentially")
     parser.add_argument('--max_train_samples', type=int, default=None, help="Max samples in train (None — all train).")
@@ -94,11 +99,12 @@ def create_training_parser() -> argparse.ArgumentParser:
     parser.add_argument('--grad_clip_max_norm', type=float, default=5.0)
     parser.add_argument('--device', type=str, choices=['cuda', 'cpu'], default='cuda')
     parser.add_argument('--scheduler', type=str, choices=['cosine', 'plateau', 'cosine-restarts'], default='cosine')
-    parser.add_argument('--scheduler_factor', type=float, default=0.5, help="For plateau scheduler")
-    parser.add_argument('--scheduler_patience', type=int, default=7, help="For plateau scheduler")
+    parser.add_argument('--scheduler_factor', type=float, default=0.3, help="For plateau scheduler")
+    parser.add_argument('--scheduler_patience', type=int, default=5, help="For plateau scheduler")
     parser.add_argument('--use_warmup', action='store_true', default=False)
     parser.add_argument('--warmup_epochs', type=int, default=8)
     parser.add_argument('--label_smoothing', type=float, default=0.0)
+    parser.add_argument('--curriculum_epochs', type=int, nargs='+', default=[0])
 
     # ==================== Debug options ====================
     parser.add_argument('--debug', action='store_true', default=False, help="If set, collect and log MIL attention scores/weights on validation")
@@ -140,12 +146,17 @@ def create_training_parser() -> argparse.ArgumentParser:
     return parser
 
 def create_train_configs(args: Namespace):
+    if (args.curriculum_epochs[0] != 0):
+        raise ValueError("Curriculum_epochs must starts from 0")
+    
     dataset_cfg = DatasetConfig(
         data_root=args.data_root,
         labels_path=args.labels_path,
         subject_independent=args.subject_independent,
         online_aug=args.online_aug,
         aug_num=args.aug_num,
+        class_freq_aug=args.class_freq_aug,
+        no_aug_prob=args.no_aug_prob,
         seed=args.seed,
         target_col=args.target_col,
         drop_others=args.drop_others,
@@ -168,7 +179,8 @@ def create_train_configs(args: Namespace):
         scheduler_patience=args.scheduler_patience,
         use_warmup=args.use_warmup,
         warmup_epochs=args.warmup_epochs,
-        label_smoothing=args.label_smoothing
+        label_smoothing=args.label_smoothing,
+        curriculum_epochs=args.curriculum_epochs
     )
 
     gnn_fusion_dim = args.gnn_fusion_dim

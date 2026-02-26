@@ -5,7 +5,7 @@ import torch
 import math
 import mlflow
 from collections import Counter
-from torch.optim import AdamW
+from torch.optim.adamw import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, CosineAnnealingWarmRestarts
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from sklearn.model_selection import train_test_split, GroupKFold, StratifiedKFold
@@ -57,27 +57,45 @@ def filter_bad_fragments(fragments: pd.DataFrame, data_root:Path):
     
     return filtered_fragmetns
 
+class_mapping = {
+    'happy':        'positive',
+    'happiness':    'positive',
+    'surprise':     'surprise',
+    'disgust':      'negative',
+    'fear':         'negative',
+    'anger':        'negative',
+    'sad':          'negative',
+    'sadness':      'negative',
+    'contempt':     'negative',
+    'others':       'others',
+    'repression':   'others',
+    'tense':        'others'
+}
+
 def prepare_microexpression_datasets(
-    data_root: str = 'data/augmented/casme3',
-    labels_path: str = 'data/augmented/casme3/labels.xlsx',
+    data_root_str: str = 'data/augmented/casme3',
+    labels_path_str: str = 'data/augmented/casme3/labels.xlsx',
     subject_independent: bool = True,
     aug_num: int = 0,
+    class_freq_aug: bool = False,
+    no_aug_prob: float = 0.0,
     seed: int = 1,
     target_col: str = 'Objective class',
     k_folds: int = 1,
     current_fold: int = 0,
-    max_train_samples: int | None = None
+    max_train_samples: int | None = None,
+    remap_classes: bool = False,
+    drop_others: bool = False
 ):
-    set_seed(seed)
-    data_root = Path(data_root)
-    labels_path = Path(labels_path)
+    data_root = Path(data_root_str)
+    labels_path = Path(labels_path_str)
 
     df_labels = pd.read_excel(labels_path)
     df_labels['Subject'] = df_labels['Subject'].astype(str).str.strip()
     df_labels['Filename'] = df_labels['Filename'].astype(str).str.strip()
     df_labels['Onset'] = df_labels['Onset'].astype(str).str.strip()
     df_labels['folder_name'] = (
-        df_labels['Subject'] + '_' + 
+        df_labels['Subject'] + '_' +  # type: ignore
         df_labels['Filename'] + '_' + 
         df_labels['Onset']
     )
@@ -92,7 +110,7 @@ def prepare_microexpression_datasets(
     
     print(f"Using {k_folds}-fold CV, current fold: {current_fold}")
     if subject_independent:
-        splitter = GroupKFold(n_splits=k_folds, shuffle=True, random_state=seed)
+        splitter = GroupKFold(n_splits=k_folds, shuffle=True, random_state=seed) # type: ignore
         split = splitter.split(fragments, groups=fragments['Subject'])
     else:
         splitter = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=seed)
@@ -120,8 +138,43 @@ def prepare_microexpression_datasets(
         print(f"  Fold {current_fold}: Train fragments: {len(train_fragments)}, Val fragments: {len(val_fragments)}")
         print("Target distribution train:", train_fragments[target_col].value_counts(normalize=True).to_dict())
         print("Target distribution val:", val_fragments[target_col].value_counts(normalize=True).to_dict())
+
+    def remap_label(label_str):
+        label_str = str(label_str).lower().strip()
+        return class_mapping.get(label_str, 'others')
+
+    if remap_classes:
+        train_fragments[target_col] = train_fragments[target_col].apply(remap_label)
+        val_fragments[target_col]   = val_fragments[target_col].apply(remap_label)
+
+    if data_root.parts[-1] == 'casmeii':
+        train_fragments = train_fragments[~train_fragments[target_col].isin(['fear', 'sadness'])].reset_index(drop=True)
+        val_fragments   = val_fragments[~val_fragments[target_col].isin(['fear', 'sadness'])].reset_index(drop=True)
+
+    if drop_others:
+        train_fragments = train_fragments[train_fragments[target_col] != 'others'].reset_index(drop=True)
+        val_fragments   = val_fragments[val_fragments[target_col] != 'others'].reset_index(drop=True)
+        print("Dropped 'others' class after remapping.")
+    else:
+        print("Kept 'others' class after remapping.")
         
-    def make_dataset(target_col, fragments_df, aug_num=0):
+    class_counts = train_fragments[target_col].value_counts().to_dict()
+    max_count = max(class_counts.values())
+    class_aug_ranges = {}
+    for cl, count in class_counts.items():
+        multiplier = max_count / count
+        target_aug = round(multiplier) - 1
+        target_aug = max(0, min(10, target_aug))
+        # min_aug = max(0, target_aug - 1)
+        # max_aug = min(14, target_aug + 1)
+        # min_aug = max(0, target_aug - 1)
+        # max_aug = min(14, target_aug + aug_num)
+        min_aug = 0
+        max_aug = max(1, target_aug)
+        class_aug_ranges[cl] = (min_aug, max_aug)
+    print("Class-based augmentation ranges (min, max):", class_aug_ranges)
+    
+    def make_dataset(target_col, fragments_df, aug_num=0, class_freq_aug=False):
         samples = []
         for _, row in fragments_df.iterrows():
             folder_name = row['folder_name']
@@ -130,25 +183,39 @@ def prepare_microexpression_datasets(
             original_csv = data_root / folder_name / "procrustes_lm_original.csv"
             if original_csv.exists():
                 samples.append((str(original_csv), target_col_value))
-    
-            if aug_num != 0:
+                
+            if random.random() < no_aug_prob:
+                continue
+        
+            if class_freq_aug:
+                min_aug, max_aug = class_aug_ranges[target_col_value]
+                if min_aug == max_aug:
+                    current_aug_num = min_aug
+                else:
+                    current_aug_num = random.randint(min_aug, max_aug + aug_num)
+            else:
+                current_aug_num = aug_num
+        
+            if current_aug_num > 0:
                 aug_taken = 0
-                for aug_csv in (data_root / folder_name).glob("procrustes_lm_*.csv"):
+                aug_files = list((data_root / folder_name).glob("procrustes_lm_*.csv"))
+                random.shuffle(aug_files)
+                for aug_csv in aug_files:
                     if aug_csv.name != "procrustes_lm_original.csv":
                         samples.append((str(aug_csv), target_col_value))
                         aug_taken += 1
-                    if aug_taken >= aug_num:
+                    if aug_taken >= current_aug_num:
                         break
-        
         return samples
     
-    train_list = make_dataset(target_col, train_fragments, aug_num=aug_num)
-    val_list = make_dataset(target_col, val_fragments, aug_num=0)
-    val_aug_list = make_dataset(target_col, val_fragments, aug_num=max(1, aug_num))
+    train_list = make_dataset(target_col, train_fragments, aug_num=aug_num, class_freq_aug=class_freq_aug)
+    val_list = make_dataset(target_col, val_fragments, aug_num=0, class_freq_aug=False)
+    val_aug_list = make_dataset(target_col, val_fragments, aug_num=1, class_freq_aug=False)
     random.shuffle(train_list)
     random.shuffle(val_list)
 
-    label_map = { cl_name:i for i, cl_name in enumerate(fragments[target_col].unique())}
+    unique_labels = sorted(set(train_fragments[target_col]) | set(val_fragments[target_col]))
+    label_map = {label: i for i, label in enumerate(unique_labels)}
     return train_list, val_list, val_aug_list, label_map
 
 
@@ -185,8 +252,8 @@ class MicroExpressionDataset(Dataset):
         return landmarks_list, label, num_frames, csv_path
     
     @staticmethod
-    def apply_landmark_aug(landmarks: list[torch.Tensor]):
-        landmarks = torch.stack([frame.clone() for frame in landmarks])
+    def apply_landmark_aug(landmarks_list: list[torch.Tensor]):
+        landmarks = torch.stack([frame.clone() for frame in landmarks_list])
         
         p_noise = 0.5
         p_rotate = 0.5
@@ -229,92 +296,46 @@ def me_collate_fn(batch):
     return landmarks_seqs, labels, lengths, csv_paths
 
 
-def _build_dataloaders(
-    data_root, labels_path, subject_independent, online_aug,
-    aug_num, seed, target_col, batch_size, drop_others, remap_classes,
-    k_folds, current_fold, max_train_samples
-):
+def _build_dataloaders(dataset_cfg: DatasetConfig, training_cfg: TrainingConfig, aug_num: int = 0, class_freq_aug: bool = False):
     train_list, val_list, val_aug_list, label_map = prepare_microexpression_datasets(
-        data_root=data_root,
-        labels_path=labels_path,
-        subject_independent=subject_independent,
+        data_root_str=dataset_cfg.data_root,
+        labels_path_str=dataset_cfg.labels_path,
+        subject_independent=dataset_cfg.subject_independent,
         aug_num=aug_num,
-        seed=seed,
-        target_col=target_col,
-        k_folds=k_folds,
-        current_fold=current_fold,
-        max_train_samples=max_train_samples
+        class_freq_aug=class_freq_aug,
+        no_aug_prob=dataset_cfg.no_aug_prob,
+        seed=dataset_cfg.seed,
+        target_col=dataset_cfg.target_col,
+        k_folds=dataset_cfg.k_folds,
+        current_fold=dataset_cfg.current_fold,
+        max_train_samples=dataset_cfg.max_train_samples,
+        remap_classes=dataset_cfg.remap_classes,
+        drop_others=dataset_cfg.drop_others
     )
     
-    class_mapping = {
-        'happy':        'positive',
-        'happiness':    'positive',
+    train_list_remapped = train_list
+    val_list_remapped = val_list
+    val_aug_list_remapped = val_aug_list
 
-        'surprise':     'surprise',
-
-        'disgust':      'negative',
-        'fear':         'negative',
-        'anger':        'negative',
-        'sad':          'negative',
-        'sadness':      'negative',
-        'contempt':     'negative',
-
-        'others':       'others',
-        'repression':   'others',
-        'tense':        'others'
-    }
-
-    def remap_sample_list(sample_list):
-        remapped = []
-        for csv_path, label_str in sample_list:
-            label_str = label_str.lower().strip()
-            new_label = class_mapping.get(label_str, 'others')
-            remapped.append((csv_path, new_label))
-        return remapped
-    
-    if remap_classes:
-        train_list_remapped = remap_sample_list(train_list)
-        val_list_remapped = remap_sample_list(val_list)
-        val_aug_list_remapped = remap_sample_list(val_aug_list)
-    else:
-        train_list_remapped = train_list
-        val_list_remapped = val_list
-        val_aug_list_remapped = val_aug_list 
-
-    if Path(data_root).parts[-1] == 'casmeii':
-        train_list_remapped = [s for s in train_list_remapped if (s[1] != 'fear') and (s[1] != 'sadness')]
-        val_list_remapped = [s for s in val_list_remapped if (s[1] != 'fear') and (s[1] != 'sadness')]
-        val_aug_list_remapped = [s for s in val_aug_list_remapped if (s[1] != 'fear') and (s[1] != 'sadness')]
-
-    if drop_others:
-        train_list_remapped = [s for s in train_list_remapped if s[1] != 'others']
-        val_list_remapped = [s for s in val_list_remapped   if s[1] != 'others']
-        val_aug_list_remapped = [s for s in val_aug_list_remapped   if s[1] != 'others']
-        print("Dropped 'others' class after remapping.")
-    else:
-        print("Kept 'others' class after remapping.")
-
-    unique_labels = sorted(set(label for _, label in train_list_remapped + val_list_remapped))
-    label_map = {label: idx for idx, label in enumerate(unique_labels)}
-    num_classes = len(unique_labels)
+    num_classes = len(label_map)
 
     train_labels = [label for _, label in train_list_remapped]
     val_labels = [label for _, label in val_list_remapped]
     val_aug_labels = [label for _, label in val_aug_list_remapped]
     full_labels = [*train_labels, *val_labels] 
-    print(f"Classes after remapping: {unique_labels}")
-    print("Full distribution:", {k: (full_labels.count(k), full_labels.count(k) / len(full_labels)) for k in unique_labels})
-    print("Train distribution:", {k: (train_labels.count(k), train_labels.count(k) / len(train_labels)) for k in unique_labels})
-    print("Val distribution:  ", {k: (val_labels.count(k), val_labels.count(k) / len(val_labels))   for k in unique_labels})
-    print("Val Aug distribution:  ", {k: (val_aug_labels.count(k), val_aug_labels.count(k) / len(val_aug_labels))   for k in unique_labels})
+    # print(f"Classes after remapping: {unique_labels}")
+    # print("Full distribution:", {k: (full_labels.count(k), full_labels.count(k) / len(full_labels)) for k in unique_labels})
+    # print("Train distribution:", {k: (train_labels.count(k), train_labels.count(k) / len(train_labels)) for k in unique_labels})
+    # print("Val distribution:  ", {k: (val_labels.count(k), val_labels.count(k) / len(val_labels))   for k in unique_labels})
+    # print("Val Aug distribution:  ", {k: (val_aug_labels.count(k), val_aug_labels.count(k) / len(val_aug_labels))   for k in unique_labels})
 
-    train_dataset = MicroExpressionDataset(train_list_remapped, label_map, simple_aug=online_aug)
+    train_dataset = MicroExpressionDataset(train_list_remapped, label_map, simple_aug=dataset_cfg.online_aug)
     val_dataset = MicroExpressionDataset(val_list_remapped, label_map)
     val_aug_dataset = MicroExpressionDataset(val_aug_list_remapped, label_map)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=me_collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=me_collate_fn)
-    val_aug_loader = DataLoader(val_aug_dataset, batch_size=batch_size, shuffle=False, collate_fn=me_collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=training_cfg.batch_size, shuffle=True, collate_fn=me_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=training_cfg.batch_size, shuffle=False, collate_fn=me_collate_fn)
+    val_aug_loader = DataLoader(val_aug_dataset, batch_size=training_cfg.batch_size, shuffle=False, collate_fn=me_collate_fn)
 
     train_labels_str = [sample[1] for sample in train_list_remapped]
     train_labels_int = [label_map[label] for label in train_labels_str]
@@ -399,6 +420,7 @@ def _build_model(
             rnn_type=temporal_model
         )
         embed_dim = temporal_module.output_dim
+        
         
     else:
         raise ValueError(f"Unknown temporal_model: {temporal_model}")
@@ -535,25 +557,27 @@ def train(
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     print(f"Using temporal model: {temporal_model}")
-
+    
+    if len(training_cfg.curriculum_epochs) == 1:
+        aug_num_list = [dataset_cfg.aug_num for i in range(training_cfg.num_epochs)]
+        class_freq_aug_list = [dataset_cfg.class_freq_aug for i in range(training_cfg.num_epochs)]
+    else:
+        aug_num_list = [0 for i in range(training_cfg.num_epochs)]
+        class_freq_aug_list = [False for i in range(training_cfg.num_epochs)]
+        curr_eps = training_cfg.curriculum_epochs
+        class_freq_aug_list[curr_eps[1]:] = [dataset_cfg.class_freq_aug] * (len(class_freq_aug_list) - curr_eps[1])
+        for i in range(1, len(training_cfg.curriculum_epochs)):
+            aug_num_list[curr_eps[i]:] = [i] * (len(aug_num_list) - curr_eps[i])
+    
     (train_loader, val_loader, val_aug_loader,
      label_map, weights, 
      train_samples, val_samples, val_aug_samples,
      class_mapping, 
      train_class_counts, val_class_counts, val_aug_class_counts) = _build_dataloaders(
-        data_root=dataset_cfg.data_root,
-        labels_path=dataset_cfg.labels_path,
-        subject_independent=dataset_cfg.subject_independent,
-        online_aug=dataset_cfg.online_aug,
-        aug_num=dataset_cfg.aug_num,
-        seed=dataset_cfg.seed,
-        target_col=dataset_cfg.target_col,
-        batch_size=training_cfg.batch_size,
-        drop_others=dataset_cfg.drop_others,
-        remap_classes=dataset_cfg.remap_classes,
-        k_folds=dataset_cfg.k_folds,
-        current_fold=dataset_cfg.current_fold,
-        max_train_samples=dataset_cfg.max_train_samples
+        dataset_cfg=dataset_cfg,
+        training_cfg=training_cfg,
+        aug_num=aug_num_list[0],
+        class_freq_aug=class_freq_aug_list[0]
     )
     weights = weights.to(device)
     num_classes = len(label_map)
@@ -569,13 +593,20 @@ def train(
 
     # 3. Optimizer & co
     criterion = torch.nn.CrossEntropyLoss(weight=weights, label_smoothing=training_cfg.label_smoothing)
-    # criterion = FocalLoss(gamma=2.5, alpha=weights, task_type='multi-class', num_classes=len(weights))
+    # criterion = FocalLoss(gamma=2, alpha=weights, task_type='multi-class', num_classes=len(weights))
     optimizer = AdamW(model.parameters(), lr=training_cfg.lr, weight_decay=training_cfg.weight_decay)
 
     lr_scheduler = None
     warmup_scheduler = None
-
-    total_batches = len(train_loader) * training_cfg.num_epochs
+    
+    
+    last_epoch_data = _build_dataloaders(
+        dataset_cfg=dataset_cfg,
+        training_cfg=training_cfg,
+        aug_num=aug_num_list[-1],
+        class_freq_aug=class_freq_aug_list[-1]
+    )
+    total_batches = ((len(train_loader) + len(last_epoch_data[0])) / 2 ) * training_cfg.num_epochs
     if training_cfg.scheduler == 'cosine':
         lr_scheduler = CosineAnnealingLR(optimizer, T_max=total_batches)
     elif training_cfg.scheduler == 'cosine-restarts':
@@ -636,7 +667,6 @@ def train(
                 params_to_log["temporal_cfg"] = rnn_cfg
 
         for cls_name, idx in label_map.items():
-            params_to_log[f"train_{cls_name}"] = train_class_counts.get(idx, 0)
             params_to_log[f"val_{cls_name}"] = val_class_counts.get(idx, 0)
             params_to_log[f"val_aug_{cls_name}"] = val_aug_class_counts.get(idx, 0)
 
@@ -665,6 +695,19 @@ def train(
         last_aug_preds = None
 
         for epoch in range(training_cfg.num_epochs):
+            if (epoch != 0):
+                (train_loader, val_loader, val_aug_loader,
+                label_map, weights, 
+                train_samples, val_samples, val_aug_samples,
+                class_mapping, 
+                train_class_counts, val_class_counts, val_aug_class_counts) = _build_dataloaders(
+                    dataset_cfg=dataset_cfg,
+                    training_cfg=training_cfg,
+                    aug_num=aug_num_list[epoch],
+                    class_freq_aug=class_freq_aug_list[epoch]
+                )
+            print(f"Aug num: {aug_num_list[epoch]}. Class freq: {class_freq_aug_list[epoch]}")
+            
             train_loss, train_acc, train_f1 = _train_epoch(
                 model=model, 
                 loader=train_loader, 
@@ -685,12 +728,11 @@ def train(
             else:
                 val_loss, val_acc, val_f1, val_labels, val_preds = val_outputs
                 
-                        
             val_aug_loss, val_aug_acc, val_aug_f1, val_aug_labels, val_aug_preds = _validate_epoch(
                 model, val_aug_loader, criterion, device, return_extras=False
             )
 
-            mlflow.log_metrics({
+            metrics_to_log = {
                 f"train_loss": train_loss,
                 f"train_acc": train_acc,
                 f"train_f1": train_f1,
@@ -700,8 +742,13 @@ def train(
                 f"val_aug_loss": val_aug_loss,
                 f"val_aug__acc": val_aug_acc,
                 f"val_aug__f1": val_aug_f1,
-                f"lr": optimizer.param_groups[0]['lr']
-            }, step=epoch)
+                f"lr": optimizer.param_groups[0]['lr'],
+                f"fragments_train": train_samples,
+            }
+            for cls_name, idx in label_map.items():
+                metrics_to_log[f"fragments_train_{cls_name}"] = train_class_counts.get(idx, 0)
+            
+            mlflow.log_metrics(metrics_to_log, step=epoch)
 
             if training_cfg.scheduler == 'plateau':
                 if warmup_scheduler:
@@ -796,6 +843,7 @@ if __name__ == "__main__":
     parser = create_training_parser()
     args = parser.parse_args()
     dataset_cfg, training_cfg, gnn_cfg, transformer_cfg, mil_cfg, rnn_cfg = create_train_configs(args)
+    set_seed(dataset_cfg.seed)
 
     if args.k_folds > 1 and args.current_fold is None:
         print(f"Starting {args.k_folds}-fold cross-validation")
